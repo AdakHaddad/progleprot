@@ -1,0 +1,60 @@
+# Yosys synthesis script for area estimation
+# Run: yosys scripts/synth.ys
+
+read_verilog -sv rtl/edge_interval.v
+read_verilog -sv rtl/histogram.v
+read_verilog -sv rtl/log_bucket.v
+read_verilog -sv rtl/peak_detect.v
+read_verilog -sv rtl/m1_top.v
+read_verilog -sv rtl/uart_framer.v
+read_verilog -sv rtl/m2_top.v
+read_verilog -sv rtl/spi_detect.v
+read_verilog -sv rtl/i2c_detect.v
+read_verilog -sv rtl/m3_top.v
+read_verilog -sv rtl/fingerprint_rom.v
+read_verilog -sv rtl/fingerprint_matcher.v
+read_verilog -sv rtl/ranked_output.v
+read_verilog -sv rtl/m4_top.v
+read_verilog -sv rtl/pin_role_discovery.v
+read_verilog -sv rtl/m5_top.v
+read_verilog -sv rtl/pdis_sequencer.v
+read_verilog -sv rtl/sequencer_compiler.v
+read_verilog -sv rtl/prog_rom.v
+read_verilog -sv rtl/m6_top.v
+
+# Synthesize each milestone top
+hierarchy -top m1_top
+synth -top m1_top -run coarse
+stat
+stat -tech ihp
+write_verilog m1_top_synth.v
+
+hierarchy -top m2_top
+synth -top m2_top -run coarse
+stat
+stat -tech ihp
+write_verilog m2_top_synth.v
+
+hierarchy -top m3_top
+synth -top m3_top -run coarse
+stat
+stat -tech ihp
+write_verilog m3_top_synth.v
+
+hierarchy -top m4_top
+synth -top m4_top -run coarse
+stat
+stat -tech ihp
+write_verilog m4_top_synth.v
+
+hierarchy -top m5_top
+synth -top m5_top -run coarse
+stat
+stat -tech ihp
+write_verilog m5_top_synth.v
+
+hierarchy -top m6_top
+synth -top m6_top -run coarse
+stat
+stat -tech ihp
+write_verilog m6_top_synth.v
