@@ -1,56 +1,80 @@
 # Tiny Tapeout project information
 project:
-  title:        ""      # Project title
-  author:       ""      # Your name
-  discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
+  title:        "Protocol Discovery Core"      # Project title
+  author:       "AdakHaddad"      # Your name
+  discord:      ""      # Your discord username (optional)
+  description:  "Auto-detects UART/SPI/I2C/CAN/USB/PS2 on 8 pins, infers protocol, compiles & replays sequencer program"  # One line description
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  clock_hz:     50000000       # Clock frequency in Hz (50 MHz)
 
   # How many tiles your design occupies? A single tile is about 202x155 uM.
-  tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2, 8x2, 3x4, 4x4, 5x4, 6x4 or 8x4
+  tiles: "8x4"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2, 8x2, 3x4, 4x4, 5x4, 6x4 or 8x4
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_example"
+  top_module:  "tt_um_protocol_disc"
 
   # List your project's source files here.
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
-    - "project.v"
+    - "tt_um_protocol_disc.v"
+    - "../rtl/edge_interval.v"
+    - "../rtl/histogram.v"
+    - "../rtl/log_bucket.v"
+    - "../rtl/peak_detect.v"
+    - "../rtl/m1_top.v"
+    - "../rtl/uart_framer.v"
+    - "../rtl/m2_top.v"
+    - "../rtl/encoding_layer.v"
+    - "../rtl/spi_detect.v"
+    - "../rtl/i2c_detect.v"
+    - "../rtl/m3_top.v"
+    - "../rtl/fingerprint_rom.v"
+    - "../rtl/fingerprint_matcher.v"
+    - "../rtl/ranked_output.v"
+    - "../rtl/m4_top.v"
+    - "../rtl/pin_role_discovery.v"
+    - "../rtl/m5_top.v"
+    - "../rtl/pdis_sequencer.v"
+    - "../rtl/sequencer_compiler.v"
+    - "../rtl/prog_rom.v"
+    - "../rtl/m6_top.v"
+    - "../rtl/ps2_detect.v"
+    - "../rtl/can_detect.v"
+    - "../rtl/usb_ls_detect.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
-  # Inputs
-  ui[0]: ""
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
-  ui[5]: ""
-  ui[6]: ""
-  ui[7]: ""
+  # Inputs - 8 protocol signal pins to monitor
+  ui[0]: "PIN0_IN"   # Protocol pin 0 (e.g., SPI MOSI, UART RX, I2C SDA)
+  ui[1]: "PIN1_IN"   # Protocol pin 1 (e.g., SPI SCK, UART TX, I2C SCL)
+  ui[2]: "PIN2_IN"   # Protocol pin 2
+  ui[3]: "PIN3_IN"   # Protocol pin 3
+  ui[4]: "PIN4_IN"   # Protocol pin 4 (e.g., SPI CS)
+  ui[5]: "PIN5_IN"   # Protocol pin 5
+  ui[6]: "PIN6_IN"   # Protocol pin 6
+  ui[7]: "PIN7_IN"   # Protocol pin 7
 
-  # Outputs
-  uo[0]: ""
-  uo[1]: ""
-  uo[2]: ""
-  uo[3]: ""
-  uo[4]: ""
-  uo[5]: ""
-  uo[6]: ""
-  uo[7]: ""
+  # Outputs - Status flags
+  uo[0]: "RESERVED"
+  uo[1]: "IDLE"            # All input pins idle
+  uo[2]: "SCAN_DONE"       # Histogram scan complete
+  uo[3]: "REPLAY_ERROR"    # Sequencer replay error
+  uo[4]: "REPLAY_DONE"     # Sequencer replay complete
+  uo[5]: "RESULT_VALID"    # New protocol result available
+  uo[6]: "AMBIGUOUS"       # Ambiguous result (tie/low confidence)
+  uo[7]: "LIST_DONE"       # Ranked list complete
 
-  # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
-  uio[5]: ""
-  uio[6]: ""
-  uio[7]: ""
+  # Bidirectional pins - Control in / Protocol ID out
+  uio[0]: "CLEAR"              # In: Active high clear/reset
+  uio[1]: "SCAN_START"         # In: Start histogram scan
+  uio[2]: "REPLAY_START"       # In: Start sequencer replay
+  uio[3]: "ENC_MODE_CH0[0]"    # In: Encoding mode bit 0 (SPI data line)
+  uio[4]: "ENC_MODE_CH0[1]"    # In: Encoding mode bit 1
+  uio[5]: "STUFF_AFTER_CH0[0]" # In: Bit stuffing threshold bit 0
+  uio[6]: "STUFF_AFTER_CH0[1]" # In: Bit stuffing threshold bit 1
+  uio[7]: "STUFF_AFTER_CH0[2]" # In: Bit stuffing threshold bit 2
 
 # Do not change!
 yaml_version: 6

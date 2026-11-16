@@ -48,7 +48,7 @@ module m6_top #(
     output wire [7:0]              seq_pc
 );
 
-    // Pin role discovery
+    // Pin role discovery - provides histogram peak detection for all pins
     wire [NUM_PINS-1:0]           pins_combined;
     assign pins_combined = pins_in;
 
@@ -66,7 +66,7 @@ module m6_top #(
         .pin_roles(pin_roles), .role_valid(role_valid),
         .idle(idle), .peak_idx(peak_idx), .peak_count(peak_count), .scan_done(scan_done));
 
-    // M4 pipeline for fingerprint matching
+    // M4 pipeline for fingerprint matching - dedicated histogram on pins 0,2 (SPI/I2C)
     wire              ch0_ev, ch0_idle, ch0_level;
     wire [CNT_W-1:0]  ch0_interval;
     wire [IDX_W-1:0]  ch0_bucket;
@@ -87,7 +87,7 @@ module m6_top #(
 
     log_bucket #(.W(CNT_W), .FRAC(FRAC)) u_lb1 (.x(ch1_interval), .idx(ch1_bucket));
 
-    // Shared histogram
+    // Shared histogram for fingerprint matching
     wire [IDX_W-1:0]  hist_rd_idx;
     wire [BIN_W-1:0]  hist_rd_data;
 
@@ -97,13 +97,16 @@ module m6_top #(
         .inc_idx(ch0_ev ? ch0_bucket : ch1_bucket),
         .rd_idx(hist_rd_idx), .rd_data(hist_rd_data));
 
-    // Peak detector (for M4 compatibility - not used for scan_done)
-    wire pk_busy;
-    peak_detect #(.IDX_W(IDX_W), .CNT_W(BIN_W)) u_pk (
+    // Peak detector for fingerprint histogram (internal, not connected to outputs)
+    wire fp_peak_done, fp_pk_busy;
+    wire [IDX_W-1:0] fp_peak_idx;
+    wire [BIN_W-1:0] fp_peak_count;
+
+    peak_detect #(.IDX_W(IDX_W), .CNT_W(BIN_W)) u_fp_pk (
         .clk(clk), .rst_n(rst_n), .start(scan_start),
         .rd_idx(hist_rd_idx), .rd_data(hist_rd_data),
-        .peak_idx(peak_idx), .peak_count(peak_count),
-        .done(), .busy(pk_busy));
+        .peak_idx(fp_peak_idx), .peak_count(fp_peak_count),
+        .done(fp_peak_done), .busy(fp_pk_busy));
 
     // ============================================================
     // Encoding Layer - decodes raw bits before protocol detection
