@@ -35,25 +35,20 @@ module tb_emu_spi_detect;
     localparam S_SYNC    = 3'd4;
     localparam S_DONE    = 3'd5;
 
+    // Synchronization flag
+    reg program_loaded = 0;
+
+    // Use #delay instead of wait_clk task to avoid re-entrancy issues
     task wait_clk(input integer n);
         integer j;
         begin for (j = 0; j < n; j = j + 1) @(negedge clk); end
     endtask
 
-    // Wait for sequencer to reach a specific PC (it will be in S_FETCH or S_EXECUTE typically)
-    task wait_for_pc(input [7:0] target_pc);
+    // Wait for DONE flag on pin 3
+    task wait_for_done;
         begin
-            while (seq_pc != target_pc) wait_clk(1);
-            wait_clk(2);
-        end
-    endtask
-
-    // Wait for sequencer to be in S_SYNC at a specific PC (polling)
-    // Note: sequencer increments PC before entering S_SYNC, so for SYNC at PC=N, wait for PC=N+1
-    task wait_for_sync_at_pc(input [7:0] target_pc);
-        begin
-            while (!(seq_pc == target_pc && seq_st == S_SYNC)) wait_clk(1);
-            wait_clk(1);
+            while (!pin_oe[3] || !pin_out[3]) wait_clk(1);
+            wait_clk(10);
         end
     endtask
 
@@ -137,8 +132,9 @@ module tb_emu_spi_detect;
         begin INS_JUMP = {4'd12, 4'd0, 4'd0, 4'd0, target, 8'd1}; end
     endfunction
 
-    // SPI Detection pins: Pin 0=SCK, Pin 1=MOSI, Pin 2=CS_N, Pin 3=MISO
-    
+    // ============================================================
+    // Initial block 1: Program load and sequencer start
+    // ============================================================
     initial begin
         rst_n = 0;
         wait_clk(4);
@@ -154,19 +150,19 @@ module tb_emu_spi_detect;
 
         // Program includes register initialization via LOAD instructions
         // PC=0: R0 = bit counter (8)
-        spi_write(8'h00, INS_LOAD(4'd0, 16'd8));
+        spi_write(8'h00, INS_LOAD(4'd0, 16'd7));
         // PC=1: R1 = RX data accumulator (0)
         spi_write(8'h01, INS_LOAD(4'd1, 16'h0000));
         // PC=2: R2 = temp
         spi_write(8'h02, INS_LOAD(4'd2, 16'h0000));
-        // PC=3: R3 = temp
+        // PC=3: R3 = constant 1 (for done flag)
         spi_write(8'h03, INS_LOAD(4'd3, 16'h0001));
 
         // PC=4: Wait for CS falling edge (pin 2 = 0) - SYNC_FALL=1
-        spi_write(8'h04, INS_SYNC(4'h4, 2'b01, 16'd10000));
+        spi_write(8'h04, INS_SYNC(4'h4, 2'b01, 16'd50000));
         
         // PC=5: Wait for SCK rising edge (pin 0) - SYNC_RISE=0
-        spi_write(8'h05, INS_SYNC(4'h1, 2'b00, 16'd1000));
+        spi_write(8'h05, INS_SYNC(4'h1, 2'b00, 16'd50000));
         
         // PC=6: SCK rising edge - sample MOSI (pin 1) into R1
         spi_write(8'h06, INS_SAMPLE(4'd1, 4'h2));
@@ -178,8 +174,8 @@ module tb_emu_spi_detect;
         // JUMP_LOOP: loop_reg=R0 (0), target=PC=5
         spi_write(8'h08, INS_JUMP_LOOP(4'd0, 8'd5));
         
-        // PC=9: Done - 8 bits received, signal done on pin 3
-        spi_write(8'h09, INS_DRIVE(4'h8, 2'b01, 2'd0));
+        // PC=9: Done - 8 bits received, signal done on pin 3 (use R3=1, mode=drive from reg)
+        spi_write(8'h09, INS_DRIVE(4'h8, 2'b01, 2'd3));
         
         // Pad remaining
         spi_write(8'h0A, INS_LOAD(4'd0, 16'd0));
@@ -190,106 +186,134 @@ module tb_emu_spi_detect;
 
         $display("Program loaded (15 instructions). Starting sequencer...");
         spi_run(8'd15);
+        
+        // Signal that program is loaded and sequencer is running
+        program_loaded = 1;
+    end
 
-        // Wait for sequencer to start executing - it will reach PC=4 (SYNC on CS)
-        // Note: sequencer increments PC before entering S_SYNC, so wait for PC=5 in S_SYNC
-        wait_for_sync_at_pc(8'd5);
-        $display("t=%0t: Reached PC=5 (SYNC on CS fall, was PC=4)", $time);
+    // ============================================================
+    // Initial block 2: Drive SPI transaction in parallel (after program loaded)
+    // ============================================================
+    initial begin
+        integer i;
+        // Wait for program to be loaded
+        while (!program_loaded) @(posedge clk);
         
-        // NOW simulate SPI master sending 0xA5 (10100101) MSB first
-        // SPI Mode 0: CS low -> 8 SCK cycles with MOSI data -> CS high
-        // SCK idles low, sample on rising edge
+        // Give sequencer time to execute LOAD instructions (PC 0-3) and reach PC=4 (SYNC on CS fall)
+        repeat (50) @(negedge clk);  
         
-        // Start: CS goes low (falling edge on pin 2)
+        $display("Starting SPI transaction... (time=%0t)", $time);
+        
+        // CS low (falling edge on pin 2)
         ui_in[2] = 0;
-        wait_clk(5);
+        $display("  CS LOW (time=%0t)", $time);
+        repeat (200) @(negedge clk);
+        $display("  After CS wait (time=%0t)", $time);
         
-        // Now wait for sequencer to reach PC=5 (SYNC on SCK rise) - wait for S_SYNC state
-        // SYNC at PC=5 -> sequencer shows PC=6 in S_SYNC
-        wait_for_sync_at_pc(8'd6);
-        $display("t=%0t: Reached PC=6 (SYNC on SCK rise, was PC=5)", $time);
-        
-        // Now send 8 bits with SCK rising edge sampling
+        // 8 SCK cycles, MSB first for 0xA5 = 10100101
         // Bit 7: 1
-        ui_in[1] = 1; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);  // SCK rise (0->1)
-        wait_for_pc(8'd6); // SAMPLE
-        wait_for_pc(8'd7); // SHIFT
-        wait_for_pc(8'd8); // JUMP_LOOP
-        wait_for_sync_at_pc(8'd6); // back to SYNC on SCK rise (PC=5 -> shows PC=6)
-        ui_in[0] = 0; wait_clk(2);  // SCK fall (1->0)
+        ui_in[1] = 1;
+        repeat (200) @(negedge clk);
+        $display("  Bit 7: MOSI=1, waiting for SCK rise (time=%0t)", $time);
+        ui_in[0] = 1;  // SCK rising
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;  // SCK falling
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
         // Bit 6: 0
-        ui_in[1] = 0; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);
-        wait_for_pc(8'd6);
-        wait_for_pc(8'd7);
-        wait_for_pc(8'd8);
-        wait_for_sync_at_pc(8'd6);
-        ui_in[0] = 0; wait_clk(2);
+        ui_in[1] = 0;
+        repeat (200) @(negedge clk);
+        $display("  Bit 6: MOSI=0 (time=%0t)", $time);
+        ui_in[0] = 1;
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
         // Bit 5: 1
-        ui_in[1] = 1; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);
-        wait_for_pc(8'd6);
-        wait_for_pc(8'd7);
-        wait_for_pc(8'd8);
-        wait_for_sync_at_pc(8'd6);
-        ui_in[0] = 0; wait_clk(2);
+        ui_in[1] = 1;
+        repeat (200) @(negedge clk);
+        $display("  Bit 5: MOSI=1 (time=%0t)", $time);
+        ui_in[0] = 1;
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
         // Bit 4: 0
-        ui_in[1] = 0; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);
-        wait_for_pc(8'd6);
-        wait_for_pc(8'd7);
-        wait_for_pc(8'd8);
-        wait_for_sync_at_pc(8'd6);
-        ui_in[0] = 0; wait_clk(2);
+        ui_in[1] = 0;
+        repeat (200) @(negedge clk);
+        $display("  Bit 4: MOSI=0 (time=%0t)", $time);
+        ui_in[0] = 1;
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
         // Bit 3: 0
-        ui_in[1] = 0; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);
-        wait_for_pc(8'd6);
-        wait_for_pc(8'd7);
-        wait_for_pc(8'd8);
-        wait_for_sync_at_pc(8'd6);
-        ui_in[0] = 0; wait_clk(2);
+        ui_in[1] = 0;
+        repeat (200) @(negedge clk);
+        $display("  Bit 3: MOSI=0 (time=%0t)", $time);
+        ui_in[0] = 1;
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
         // Bit 2: 1
-        ui_in[1] = 1; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);
-        wait_for_pc(8'd6);
-        wait_for_pc(8'd7);
-        wait_for_pc(8'd8);
-        wait_for_sync_at_pc(8'd6);
-        ui_in[0] = 0; wait_clk(2);
+        ui_in[1] = 1;
+        repeat (200) @(negedge clk);
+        $display("  Bit 2: MOSI=1 (time=%0t)", $time);
+        ui_in[0] = 1;
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
         // Bit 1: 0
-        ui_in[1] = 0; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);
-        wait_for_pc(8'd6);
-        wait_for_pc(8'd7);
-        wait_for_pc(8'd8);
-        wait_for_sync_at_pc(8'd6);
-        ui_in[0] = 0; wait_clk(2);
+        ui_in[1] = 0;
+        repeat (200) @(negedge clk);
+        $display("  Bit 1: MOSI=0 (time=%0t)", $time);
+        ui_in[0] = 1;
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
         // Bit 0: 1
-        ui_in[1] = 1; wait_clk(2);
-        ui_in[0] = 1; wait_clk(2);
-        wait_for_pc(8'd6);
-        wait_for_pc(8'd7);
-        wait_for_pc(8'd8);
-        wait_for_sync_at_pc(8'd6);
-        ui_in[0] = 0; wait_clk(2);
+        ui_in[1] = 1;
+        repeat (200) @(negedge clk);
+        $display("  Bit 0: MOSI=1 (time=%0t)", $time);
+        ui_in[0] = 1;
+        $display("  SCK RISING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
+        ui_in[0] = 0;
+        $display("  SCK FALLING (time=%0t)", $time);
+        repeat (2000) @(negedge clk);
         
-        // CS high (rising edge on pin 2) - not needed but clean up
+        // CS high (rising edge on pin 2)
         ui_in[2] = 1;
-        wait_clk(10);
+        $display("  CS HIGH (time=%0t)", $time);
+        repeat (200) @(negedge clk);
+        
+        $display("SPI transaction complete (time=%0t)", $time);
+    end
 
-        // Wait for sequencer to complete - loop will exit when R0 reaches 0
-        // Then PC advances to 9
-        wait_for_pc(8'd9);
-        wait_clk(100);
+    // ============================================================
+    // Initial block 3: Monitor for DONE flag and report results
+    // ============================================================
+    initial begin
+        // Wait for reset and program load
+        repeat (20) @(negedge clk);
+        wait_for_done();
         
         $display("=== Results ===");
         $display("Final PC: %d", seq_pc);
@@ -297,7 +321,7 @@ module tb_emu_spi_detect;
         $display("R0 (bit counter): %d", reg0);
         $display("R1 (RX data): %h (expected A5)", reg1);
         $display("R2 (temp): %h", reg2);
-        $display("R3 (temp): %h", reg3);
+        $display("R3 (constant 1): %h", reg3);
 
         if (reg1 == 16'h00A5) begin
             $display("SUCCESS: SPI detection works! Received 0xA5");
@@ -324,5 +348,5 @@ module tb_emu_spi_detect;
         end
     end
 
-    initial begin #300000; $display("TIMEOUT"); $finish; end
+    initial begin #5000000; $display("TIMEOUT"); $finish; end
 endmodule
