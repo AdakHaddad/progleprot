@@ -8,6 +8,7 @@
 | `tb_emu_uart.v` | ✅ PASS | UART TX transmission verified |
 | `tb_emu_sync_jump.v` | ✅ PASS | SYNC edge detection + JUMP_LOOP back-to-back |
 | `tb_host_if.v` | ✅ PASS | SPI host interface write/read/run |
+| `tb_emu_i2c_detect.v` | ✅ PASS | I²C detection: receives 0xA5, ACK=0 |
 | `tb_emu_spi_master.v` | ⏱️ TIMEOUT | Needs longer simulation time |
 | `tb_emu_i2c_master.v` | ⏱️ TIMEOUT | Needs longer simulation time |
 
@@ -57,6 +58,53 @@ R1 (RX data): 00a5 (expected A5)
 SUCCESS: SPI detection works! Received 0xA5
 ```
 
+## I²C Detection Test Details
+
+### Test Configuration
+- **Protocol**: I²C (standard mode, 100kHz equivalent timing)
+- **Transaction**: Master write to address 0x50 + Read bit (0xA5 = 10100101)
+- **Pins**: ui_in[0]=SDA, ui_in[1]=SCL
+
+### Program Flow (PC addresses)
+```
+PC=0:  LOAD  R0, 7      ; Bit counter (8 iterations: 7→0)
+PC=1:  LOAD  R1, 0      ; RX accumulator
+PC=2:  LOAD  R2, 0      ; Temp register
+PC=3:  LOAD  R3, 1      ; Done flag constant
+PC=4:  SYNC  pin=0, FALL, timeout=50000  ; Wait for START (SDA fall)
+PC=5:  SYNC  pin=1, RISE, timeout=50000  ; Wait for SCL rising
+PC=6:  SHIFT R1, R1, 1, LEFT  ; Make room for new bit
+PC=7:  SAMPLE R2, pin=0       ; Sample SDA
+PC=8:  XOR  R1, R1, R2        ; Accumulate bit
+PC=9:  JUMP_LOOP R0, PC=5     ; Loop if R0 > 0
+PC=10: SYNC  pin=1, RISE       ; Wait for ACK clock (9th SCL)
+PC=11: SAMPLE R3, pin=0       ; Sample ACK (0=ACK, 1=NACK)
+PC=12: SYNC  pin=0, RISE       ; Wait for STOP (SDA rise)
+PC=13: DRIVE pin=3, HIGH       ; Signal done
+```
+
+### Key Debug Output
+```
+t=94830 EXEC: PC=  6 R0=7 R1=0000 R2=0000 R3=0001
+t=94870 SAMPLE: pin_in=00000011 pin_in_sync=00000011 mask=0x1, sampled=00000001
+t=94910 EXEC: PC=  8 R0=7 R1=0000 R2=0001 R3=0001
+t=94950 EXEC: PC=  9 R0=7 R1=0001 R2=0001 R3=0001
+...
+t=654830 EXEC: PC=  6 R0=0 R1=0052 R2=0000 R3=0001
+t=654870 SAMPLE: pin_in=00000011 pin_in_sync=00000011 mask=0x1, sampled=00000001
+t=654910 EXEC: PC=  8 R0=0 R1=00a4 R2=0001 R3=0001
+t=654950 EXEC: PC=  9 R0=0 R1=00a5 R2=0001 R3=0001
+t=734830 EXEC: PC= 11 R0=0 R1=00a5 R2=0001 R3=0001
+t=734870 EXEC: PC= 12 R0=0 R1=00a5 R2=0001 R3=0000   ; ACK sampled = 0
+=== Results ===
+Final PC:   0
+Done: 0, Error: 0
+R0 (bit counter): 0
+R1 (RX data): 00a5 (expected A5 = address 0x50 + R)
+R3 (ACK sampled): 0000 (expected 0 = ACK received)
+SUCCESS: I²C detection works! Received 0xA5, ACK=0
+```
+
 ## SYNC/JUMP Test Details
 
 Tests edge detection (SYNC) and back-to-back loop handling (JUMP_LOOP):
@@ -84,6 +132,10 @@ vvp sim_sync.vvp
 # Host Interface
 iverilog -g2012 -o sim_host.vvp -Isrc -Irtl sim/tb_host_if.v src/project.v rtl/pdis_sequencer.v rtl/prog_ram.v rtl/host_if.v
 vvp sim_host.vvp
+
+# I²C Detection
+iverilog -g2012 -o sim_i2c_detect.vvp -Isrc -Irtl sim/tb_emu_i2c_detect.v src/project.v rtl/pdis_sequencer.v rtl/prog_ram.v rtl/host_if.v
+vvp sim_i2c_detect.vvp
 ```
 
 ## Core Verilog Files
