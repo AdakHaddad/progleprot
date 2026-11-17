@@ -1,80 +1,54 @@
 # Tiny Tapeout project information
 project:
-  title:        "Protocol Discovery Core"      # Project title
+  title:        "Protocol Emulator"      # Project title
   author:       "AdakHaddad"      # Your name
   discord:      ""      # Your discord username (optional)
-  description:  "Auto-detects UART/SPI/I2C/CAN/USB/PS2 on 8 pins, infers protocol, compiles & replays sequencer program"  # One line description
-  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
+  description:  "Tiny CPU + 8 hardware timers with NCO — run firmware to implement any protocol (UART/SPI/I2C/CAN/USB/custom) with cycle-accurate timing"  # One line description
+  language:     "Verilog"
   clock_hz:     50000000       # Clock frequency in Hz (50 MHz)
 
-  # How many tiles your design occupies? A single tile is about 202x155 uM.
-  tiles: "8x4"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2, 8x2, 3x4, 4x4, 5x4, 6x4 or 8x4
+  tiles: "8x4"          # 8x4 tiles
 
-  # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_protocol_disc"
+  top_module:  "tt_um_protocol_emu"
 
-  # List your project's source files here.
-  # Source files must be in ./src and you must list each source file separately, one per line.
-  # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
-    - "tt_um_protocol_disc.v"
-    - "../rtl/edge_interval.v"
-    - "../rtl/histogram.v"
-    - "../rtl/log_bucket.v"
-    - "../rtl/peak_detect.v"
-    - "../rtl/m1_top.v"
-    - "../rtl/uart_framer.v"
-    - "../rtl/m2_top.v"
-    - "../rtl/encoding_layer.v"
-    - "../rtl/spi_detect.v"
-    - "../rtl/i2c_detect.v"
-    - "../rtl/m3_top.v"
-    - "../rtl/fingerprint_rom.v"
-    - "../rtl/fingerprint_matcher.v"
-    - "../rtl/ranked_output.v"
-    - "../rtl/m4_top.v"
-    - "../rtl/pin_role_discovery.v"
-    - "../rtl/m5_top.v"
-    - "../rtl/pdis_sequencer.v"
-    - "../rtl/sequencer_compiler.v"
-    - "../rtl/prog_rom.v"
-    - "../rtl/m6_top.v"
-    - "../rtl/ps2_detect.v"
-    - "../rtl/can_detect.v"
-    - "../rtl/usb_ls_detect.v"
+    - "tt_um_protocol_emu.v"
+    - "../rtl/cpu_core.v"
+    - "../rtl/timer_coproc.v"
+    - "../rtl/pin_matrix.v"
+    - "../rtl/prog_mem.v"
+    - "../rtl/host_if.v"
+    - "../rtl/capture_buf.v"
 
-# The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
-# This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
-  # Inputs - 8 protocol signal pins to monitor
-  ui[0]: "PIN0_IN"   # Protocol pin 0 (e.g., SPI MOSI, UART RX, I2C SDA)
-  ui[1]: "PIN1_IN"   # Protocol pin 1 (e.g., SPI SCK, UART TX, I2C SCL)
-  ui[2]: "PIN2_IN"   # Protocol pin 2
-  ui[3]: "PIN3_IN"   # Protocol pin 3
-  ui[4]: "PIN4_IN"   # Protocol pin 4 (e.g., SPI CS)
-  ui[5]: "PIN5_IN"   # Protocol pin 5
-  ui[6]: "PIN6_IN"   # Protocol pin 6
-  ui[7]: "PIN7_IN"   # Protocol pin 7
+  # Inputs - 8 bidirectional protocol pins (UI)
+  ui[0]: "PIN0"   # Protocol pin 0
+  ui[1]: "PIN1"   # Protocol pin 1
+  ui[2]: "PIN2"   # Protocol pin 2
+  ui[3]: "PIN3"   # Protocol pin 3
+  ui[4]: "PIN4"   # Protocol pin 4
+  ui[5]: "PIN5"   # Protocol pin 5
+  ui[6]: "PIN6"   # Protocol pin 6
+  ui[7]: "PIN7"   # Protocol pin 7
 
-  # Outputs - Status flags
-  uo[0]: "RESERVED"
-  uo[1]: "IDLE"            # All input pins idle
-  uo[2]: "SCAN_DONE"       # Histogram scan complete
-  uo[3]: "REPLAY_ERROR"    # Sequencer replay error
-  uo[4]: "REPLAY_DONE"     # Sequencer replay complete
-  uo[5]: "RESULT_VALID"    # New protocol result available
-  uo[6]: "AMBIGUOUS"       # Ambiguous result (tie/low confidence)
-  uo[7]: "LIST_DONE"       # Ranked list complete
+  # Outputs - Pin outputs when driven (UO)
+  uo[0]: "PIN0_OUT"
+  uo[1]: "PIN1_OUT"
+  uo[2]: "PIN2_OUT"
+  uo[3]: "PIN3_OUT"
+  uo[4]: "PIN4_OUT"
+  uo[5]: "PIN5_OUT"
+  uo[6]: "PIN6_OUT"
+  uo[7]: "PIN7_OUT"
 
-  # Bidirectional pins - Control in / Protocol ID out
-  uio[0]: "CLEAR"              # In: Active high clear/reset
-  uio[1]: "SCAN_START"         # In: Start histogram scan
-  uio[2]: "REPLAY_START"       # In: Start sequencer replay
-  uio[3]: "ENC_MODE_CH0[0]"    # In: Encoding mode bit 0 (SPI data line)
-  uio[4]: "ENC_MODE_CH0[1]"    # In: Encoding mode bit 1
-  uio[5]: "STUFF_AFTER_CH0[0]" # In: Bit stuffing threshold bit 0
-  uio[6]: "STUFF_AFTER_CH0[1]" # In: Bit stuffing threshold bit 1
-  uio[7]: "STUFF_AFTER_CH0[2]" # In: Bit stuffing threshold bit 2
+  # Bidirectional - Host SPI + status (UIO)
+  uio[0]: "SPI_SCK"        # In: Host SPI clock
+  uio[1]: "SPI_MOSI"       # In: Host SPI data in
+  uio[2]: "SPI_CS_N"       # In: Host SPI chip select (active low)
+  uio[3]: "SPI_MISO"       # Out: Host SPI data out
+  uio[4]: "STATUS_RUN"     # Out: CPU running
+  uio[5]: "STATUS_ERR"     # Out: CPU error/fault
+  uio[6]: "CAPTURE_RDY"    # Out: Capture buffer ready
+  uio[7]: "RESERVED"       # Reserved
 
-# Do not change!
 yaml_version: 6

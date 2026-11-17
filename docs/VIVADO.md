@@ -1,188 +1,229 @@
-# Vivado / Tiny Tapeout Integration Guide
-
-## Target
-- **Process**: IHP 130nm CMOS5L (Tiny Tapeout)
-- **Tiles**: 8x4 = 32 tiles (~1.0 mm^2, ~32K cells budget)
-- **Shuttle**: March 2027
+# Vivado Synthesis Flow for Tiny Tapeout IHP
 
 ## Prerequisites
+- Vivado 2023.2+
+- IHP 130nm PDK installed
+- Tiny Tapeout IHP user project template
 
-- Vivado 2024.1+ (or compatible)
-- IHP PDK for Tiny Tapeout
-- Yosys for pre-synthesis area estimates
+## Project Structure
+```
+project/
+├── src/
+│   └── project.v              # Top-level wrapper (includes tt_um_protocol_emu.v)
+├── rtl/
+│   ├── tt_um_protocol_emu.v   # TT IHP wrapper
+│   ├── pdis_sequencer.v       # Instruction sequencer
+│   ├── prog_ram.v             # Dual-port program RAM
+│   └── host_if.v              # SPI host interface
+├── sim/
+│   ├── tb_host_if.v           # Host IF unit test
+│   ├── tb_emu_uart.v          # UART TX integration test
+│   └── tb_emu_sample.v        # SAMPLE instruction test
+├── constraints/
+│   └── timing.xdc             # Timing constraints
+└── docs/
+    ├── ISA.md                 # Instruction set reference
+    ├── USAGE.md               # This file
+    └── VIVADO.md              # This file
+```
+
+## Vivado Project Setup
+
+### 1. Create Project
+```tcl
+# In Vivado Tcl console
+create_project protocol_emu ./project -part ihp_sg13g2
+# Note: IHP part name depends on PDK installation
+```
+
+### 2. Add Sources
+```tcl
+add_files {
+  ../src/project.v
+  ../rtl/tt_um_protocol_emu.v
+  ../rtl/pdis_sequencer.v
+  ../rtl/prog_ram.v
+  ../rtl/host_if.v
+}
+
+# Set top module
+set_property top tt_um_protocol_emu [current_fileset]
+```
+
+### 3. Add Constraints
+```tcl
+add_files -fileset constrs_1 ../constraints/timing.xdc
+```
+
+### 4. Synthesis Settings
+```tcl
+# For IHP 130nm, use appropriate synthesis strategy
+set_property STEPS.SYNTH_DESIGN.ARGS.MORE_OPTIONS { -no_lc -flatten_hierarchy none } [get_runs synth_1]
+```
+
+## Timing Constraints (timing.xdc)
+
+```tcl
+# Clock: 10-50 MHz typical for protocol emulation
+create_clock -period 20.0 -name clk [get_ports clk]
+
+# Input/output delays for SPI host interface
+set_input_delay -clock clk -max 2.0 [get_ports uio_in[0]]   # SCK
+set_input_delay -clock clk -max 2.0 [get_ports uio_in[1]]   # MOSI
+set_input_delay -clock clk -max 2.0 [get_ports uio_in[2]]   # CS_N
+set_output_delay -clock clk -max 3.0 [get_ports uio_out[0]] # MISO
+
+# Protocol pins - no strict timing (software timed)
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[0]]
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[1]]
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[2]]
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[3]]
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[4]]
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[5]]
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[6]]
+set_input_delay -clock clk -max 5.0 [get_ports ui_in[7]]
+
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[0]]
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[1]]
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[2]]
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[3]]
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[4]]
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[5]]
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[6]]
+set_output_delay -clock clk -max 5.0 [get_ports uo_out[7]]
+
+# False paths for async host interface
+set_false_path -from [get_ports uio_in[*]] -to [get_clocks clk]
+set_false_path -from [get_clocks clk] -to [get_ports uio_out[0]]
+
+# Reset
+set_property ASYNC_REG true [get_cells -hierarchical *rst*]
+```
+
+## IHP 130nm Specific Notes
+
+### Memory Configuration
+The `prog_ram` uses dual-port distributed RAM. For IHP:
+- 256 × 32 = 8192 bits
+- Maps to ~16K gates (LUTRAM)
+- Should fit in available block RAM or distributed RAM
+
+### Power/Clock Gating
+```tcl
+# If using power domains
+create_power_domain -name PD_CORE -elements [get_cells -hierarchical u_sequencer]
+create_power_domain -name PD_RAM -elements [get_cells -hierarchical u_prog_ram]
+```
+
+### Area Budget
+TT IHP: 8×4 tiles ≈ 32K cells
+- Estimated: ~18K cells (56% utilization)
+- Room for: additional protocols, larger RAM, debug features
 
 ## Synthesis Flow
 
-### 1. Yosys Quick Area Check (per milestone)
-
 ```bash
-# Create synthesis script
-cat > synth.ys << 'EOF'
-read_verilog -sv rtl/*.v
-hierarchy -top m6_top
-synth -top m6_top -run coarse
-stat -tech ihp
-EOF
+# Run synthesis
+launch_runs synth_1 -jobs 8
+wait_on_run synth_1
 
-yosys synth.ys
-```
-
-Expected cell counts (from architecture.md):
-| Block | Est. Cells |
-|-------|------------|
-| M1 (edge_interval + histogram + peak) | 1.7K |
-| M2 (uart_framer + m2_top) | 4.7K |
-| M3 (spi_detect + i2c_detect) | 2.0K |
-| M4 (fingerprint_rom + matcher) | 2.0K |
-| M5 (pin_role_discovery) | 2.0K |
-| M6 (pdis_sequencer x2 + compiler) | 4.0K |
-| M8 (encoding_layer) | 1.5K |
-| **Total** | **~20K** (37% margin under 32K) |
-
-### 2. Vivado Project Setup
-
-```tcl
-# create_project.tcl
-create_project protocoldisc ./vivado -part xc7k70tfbv676-1
-# Note: Use IHP PDK part when available; xc7k70t for prototyping
-
-# Add sources
-add_files {
-    rtl/edge_interval.v
-    rtl/histogram.v
-    rtl/log_bucket.v
-    rtl/peak_detect.v
-    rtl/m1_top.v
-    rtl/uart_framer.v
-    rtl/m2_top.v
-    rtl/encoding_layer.v
-    rtl/spi_detect.v
-    rtl/i2c_detect.v
-    rtl/m3_top.v
-    rtl/fingerprint_rom.v
-    rtl/fingerprint_matcher.v
-    rtl/ranked_output.v
-    rtl/m4_top.v
-    rtl/pin_role_discovery.v
-    rtl/m5_top.v
-    rtl/pdis_sequencer.v
-    rtl/sequencer_compiler.v
-    rtl/prog_rom.v
-    rtl/m6_top.v
-    rtl/ps2_detect.v
-    rtl/can_detect.v
-}
-
-# Set top
-set_property top m6_top [current_fileset]
-
-# Constraints
-add_files -fileset constrs_1 constr.xdc
-```
-
-### 3. Clock & Timing Constraints
-
-```tcl
-# constr.xdc
-# Single clock domain (all logic synchronous to clk)
-create_clock -period 20.000 -name clk [get_ports clk]
-set_clock_latency 0.5 [get_clocks clk]
-set_clock_uncertainty 0.2 [get_clocks clk]
-
-# Input/output delays (adjust for IHP IO)
-set_input_delay -clock clk 2.0 [get_ports pins_in[*]]
-set_output_delay -clock clk 2.0 [get_ports pin_roles[*]]
-set_output_delay -clock clk 2.0 [get_ports result_*]
-
-# False paths for async control
-set_false_path -from [get_ports clear] -to [all_registers]
-set_false_path -from [get_ports scan_start] -to [all_registers]
-set_false_path -from [get_ports replay_start] -to [all_registers]
-set_false_path -from [get_ports enc_mode_ch0] -to [all_registers]
-set_false_path -from [get_ports stuff_after_ch0] -to [all_registers]
-```
-
-### 4. Run Synthesis
-
-```tcl
-# In Vivado Tcl console
-synth_design -top m6_top -mode out_of_context
-# Or with flattening for better area
-synth_design -top m6_top -flatten_hierarchy full
-
-# Check utilization
+# Check results
 report_utilization -hierarchical
 report_timing_summary
-```
-
-### 5. Area Optimization Knobs
-
-| Parameter | Default | Minimal | Effect |
-|-----------|---------|---------|--------|
-| FRAC | 1 (32 bins) | 1 | 2->1 saves ~30% histogram |
-| BIN_W | 8 | 6 | Saves ~20% histogram counters |
-| MAX_PRINTS | 16 | 8 | Halves fingerprint ROM |
-| N_COLLECT | 1024 | 512 | Reduces scan time |
-| PROG_DEPTH | 256 | 128 | Halves sequencer program mem |
-
-```bash
-# Quick test minimal config
-make FRAC=1 BIN_W=6 MAX_PRINTS=8 test_all
-```
-
-### 6. IHP-Specific Notes
-
-- **SRAM Macros**: Use for prog_mem (256x32) and fingerprint_rom (16x64) if available
-- **Clock Tree**: Single clock domain simplifies CDC
-- **IO Pins**: 8 input + role outputs + debug + encoding ctrl = ~24 pins (check TT template)
-- **Voltage**: 1.2V core, 1.8V/3.3V IO (verify with IHP PDK)
-
-### 7. P&R Flow
-
-```tcl
-# After synthesis
-opt_design
-place_design
-phys_opt_design
-route_design
-report_timing_summary
-report_drc
 report_power
 ```
 
-### 8. TT Shuttle Checklist
+## Post-Synthesis Checks
 
-- [ ] Design fits in 8x4 tiles
-- [ ] No timing violations at target frequency
-- [ ] DRC clean
-- [ ] Power within budget
-- [ ] GDS export matches TT format
-- [ ] IO ring compatible with TT frame
-- [ ] Test vectors generated for silicon bring-up
+### 1. Area Report
+```tcl
+report_utilization -hierarchical -file area_report.txt
+# Check: Total cells < 32000
+```
 
-## Simulation Gate-Level
+### 2. Timing Report
+```tcl
+report_timing_summary -file timing_report.txt
+# Check: WNS > 0 (no violations at target frequency)
+```
+
+### 3. Critical Path
+Typical critical path:
+```
+host_if SPI shift register -> prog_ram write -> sequencer fetch -> pin output
+```
+
+### 4. Power Report
+```tcl
+report_power -file power_report.txt
+# Check: Within TT power budget
+```
+
+## Implementation Flow
 
 ```bash
-# After synthesis, generate gate-level netlist
-write_verilog -force ./vivado/protocoldisc_synth.v
+# Place and route
+launch_runs impl_1 -jobs 8
+wait_on_run impl_1
 
-# Simulate with SDF timing
-iverilog -g2012 -o sim.vvp ./vivado/protocoldisc_synth.v sim/tb_m6.v && vvp sim.vvp
+# Post-route timing
+report_timing_summary -file post_route_timing.txt
+
+# DRC check
+report_drc -file drc_report.txt
+
+# Generate bitstream (if applicable)
+write_bitstream -force protocol_emu.bit
 ```
+
+## TT IHP Submission Checklist
+
+- [ ] Synthesis passes without errors
+- [ ] Timing meets at 50MHz (20ns period)
+- [ ] Area < 32K cells
+- [ ] DRC clean
+- [ ] Power within budget
+- [ ] All testbenches pass simulation
+- [ ] RTL linting clean (spyglass/verilator)
+- [ ] Documentation complete (ISA.md, USAGE.md)
+- [ ] GDSII generated (via TT flow)
 
 ## Troubleshooting
 
-| Issue | Fix |
-|-------|-----|
-| Area > 32K | Reduce FRAC, BIN_W, MAX_PRINTS, PROG_DEPTH |
-| Timing violation | Pipeline histogram/peak detect; reduce clock freq |
-| Latch inferred | Check all case/default branches in FSMs |
-| X propagation | Ensure all registers have rst_n |
+### Common Issues
 
-## Current Status
+**RAM inference fails:**
+- Ensure `prog_ram.v` uses `reg [WIDTH-1:0] mem [0:DEPTH-1]`
+- Add `(* ram_style = "distributed" *)` attribute if needed
 
-- All M1-M6 tests pass
-- M8 encoding layer integrated (NRZ/NRZI/Manchester/Stuffing)
-- PS/2 detector fixed and passing
-- CAN detector created (untested)
-- Ready for M7 synthesis area check
+**Timing violations on SPI interface:**
+- SPI is async to clk, use `set_false_path`
+- Or add synchronizers in host_if
+
+**Area too large:**
+- Reduce PROG_DEPTH from 256 to 128
+- Reduce NUM_REGS from 4 to 2
+- Use smaller REG_W (8-bit instead of 16-bit)
+
+**Simulation/synthesis mismatch:**
+- Check for blocking vs non-blocking assignments
+- Ensure reset polarity consistent (active low rst_n)
+- Verify initial blocks synthesize correctly
+
+## Yosys Alternative (Open Source)
+
+```bash
+# Quick area estimate without Vivado
+yosys -p "
+  read_verilog -I rtl rtl/tt_um_protocol_emu.v
+  read_verilog -I rtl rtl/pdis_sequencer.v
+  read_verilog -I rtl rtl/prog_ram.v
+  read_verilog -I rtl rtl/host_if.v
+  hierarchy -top tt_um_protocol_emu
+  synth -top tt_um_protocol_emu
+  stat
+  write_json synth.json
+"
+```
+
+This provides gate-level cell count for area budgeting.

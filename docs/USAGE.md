@@ -1,157 +1,215 @@
-# Protocol Discovery Core — Usage & Testing Guide
+# Protocol Emulator - Usage Guide
 
 ## Quick Start
 
+### Prerequisites
+- iverilog (for simulation)
+- yosys (for synthesis - optional)
+- make
+
+### Run Tests
 ```bash
 cd /home/muqtada/Documents/progleprot
 
-# Run all simulation tests
-make test_all      # Runs all milestones M1-M6 + PS/2
-make sweep         # M1: parameter sweep (4 FRAC/BIN_W combos)
+# Host interface unit test
+iverilog -g2012 -o sim.vvp -Isrc -Irtl sim/tb_host_if.v rtl/host_if.v
+vvp sim.vvp
 
-# Individual milestones
-make m1            # M1: histogram/peak detect
-make m2            # M2: UART auto-baud + framing
-make m3            # M3: SPI + I²C detection
-make m4            # M4: Fingerprint matching
-make m5            # M5: Pin-role discovery
-make m6            # M6: Full closed-loop (discovery→compile→replay)
-make ps2           # PS/2 detector test
+# UART TX integration test  
+iverilog -g2012 -o sim.vvp -Isrc -Irtl sim/tb_emu_uart.v src/project.v rtl/pdis_sequencer.v rtl/prog_ram.v rtl/host_if.v
+vvp sim.vvp
+
+# SAMPLE instruction test
+iverilog -g2012 -o sim.vvp -Isrc -Irtl sim/tb_emu_sample.v src/project.v rtl/pdis_sequencer.v rtl/prog_ram.v rtl/host_if.v
+vvp sim.vvp
 ```
 
-## Milestone Test Commands
+## Architecture Overview
 
-```bash
-# M1: Edge interval + histogram + peak detect
-make m1
-
-# M1 Parameter Sweep (FRAC/BIN_W)
-make sweep
-
-# M2: UART auto-baud + framing
-make m2
-
-# M3: SPI + I²C detection (with encoding layer support)
-make m3
-
-# M4: Fingerprint matching + ranked output
-make m4
-
-# M5: Pin-role discovery
-make m5
-
-# M6: Full closed-loop (discovery → compile → replay)
-make m6
-
-# PS/2 detector
-make ps2
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    tt_um_protocol_emu                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │   host_if    │──│  prog_ram    │──│ pdis_sequencer   │  │
+│  │  (SPI slave) │  │ (256×32 dual)│  │  (ISA executor)  │  │
+│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+│         │                │                   │              │
+│         ▼                ▼                   ▼              │
+│    SPI pins         Program RAM          Pin I/O (8 pins)   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Key Parameters
+## Loading Firmware via SPI
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `CNT_W` | 16 | Interval counter width (cycles) |
-| `FRAC` | 1 | Log bucket fractional bits (1=32 bins, 2=64 bins) |
-| `BIN_W` | 8 | Histogram counter bits (6/8/12) |
-| `NUM_PINS` | 8 | Input pins monitored |
-| `N_COLLECT` | 1024 | Intervals collected per scan |
-| `MAX_PRINTS` | 16 | Fingerprint ROM entries |
+The host interface accepts 64-bit SPI commands (MSB first):
 
-## Encoding Layer Modes (M8)
+```
+Bit:  63........................32  31..........16  15......8  7..0
+      [      32-bit DATA       ] [  16-bit ADDR  ] [ 8b CMD ] [pad]
+```
 
-The encoding layer (`encoding_layer.v`) sits before protocol detectors and supports:
+### Command: WRITE (0x01)
+Write 32-bit instruction to program RAM at address.
+- `addr`: Program address (0-255)
+- `data`: 32-bit instruction encoding
+- Updates `seq_prog_len` to max(addr+1) automatically
 
-| Mode | Value | Description |
-|------|-------|-------------|
-| NRZ | 2'd0 | Direct bit mapping (default) |
-| NRZI | 2'd1 | Transition = 0, No transition = 1 |
-| Manchester | 2'd2 | High→low = 0, Low→high = 1 |
-| Stuffing | 2'd3 | Bit stuffing (CAN/USB) |
+### Command: RUN (0x03)
+Start sequencer execution.
+- `addr`: Program length (number of instructions to execute)
+- `data`: Ignored (set to 0)
+- Asserts `seq_start` pulse for 1 cycle on CS rise
 
-**Inputs:**
-- `ch0_enc_mode[1:0]` - Encoding mode for channel 0 (SPI data line)
-- `ch0_stuff_after[3:0]` - Stuff after N consecutive same bits (0=disable)
+### SPI Timing (Mode 0)
+- SCK idle low
+- MOSI sampled on SCK rising edge
+- CS_N active low
+- 64 clocks per command
 
-**Usage in m3_top/m6_top:**
-- Applied to SPI data line (pin 0 / pins_in[0]) only
-- I2C uses raw signals directly (no encoding layer needed)
+## Writing Firmware
 
-## Pin Mapping (Testbench)
-
-| Pin | M5/M6 Role | Signal |
-|-----|------------|--------|
-| 0 | CLK | SPI SCK / I²C SCL (ch0) |
-| 1 | DATA | SPI MOSI/MISO / I²C SDA (ch0) |
-| 2 | CLK | I²C SCL / SPI SCK (ch1) |
-| 3 | CLK | I²C SDA / CS |
-| 4 | CS | SPI CS (active low) |
-| 5 | TX | UART TX |
-| 6 | CS | Additional CS |
-| 7 | CS | Additional CS |
-
-## Adding Custom Fingerprints
-
-Edit `rtl/fingerprint_rom.v`:
+### Instruction Helpers (Verilog)
 ```verilog
-// Format: {proto_id, pattern_len, pattern_bits}
-// proto_id: 1=SPI, 2=I²C, 3=UART, 4=PS/2
-// Add entries to the case statement
+function [31:0] INS_NOP;
+    begin INS_NOP = 32'h00000000; end
+endfunction
+
+function [31:0] INS_LOAD(input [3:0] dst, input [15:0] val);
+    begin INS_LOAD = {4'd9, dst, 8'd0, val}; end
+endfunction
+
+function [31:0] INS_DRIVE(input [3:0] mask, input [1:0] mode, input [1:0] reg_idx);
+    begin INS_DRIVE = {4'd1, mask, mode, reg_idx, 20'd0}; end
+endfunction
+
+function [31:0] INS_WAIT(input [3:0] wait_mode, input [15:0] count);
+    begin INS_WAIT = {4'd2, wait_mode, 12'd0, count}; end
+endfunction
+
+function [31:0] INS_SAMPLE(input [3:0] dst, input [3:0] mask);
+    begin INS_SAMPLE = {4'd3, dst, mask, 20'd0}; end
+endfunction
+
+function [31:0] INS_SHIFT(input [3:0] dst, input [3:0] src, input [3:0] cnt, input dir);
+    begin INS_SHIFT = {4'd4, dst, src, cnt, dir, 11'd0}; end
+endfunction
+
+function [31:0] INS_BRANCH(input [3:0] cond, input [7:0] target);
+    begin INS_BRANCH = {4'd5, cond, 12'd0, target}; end
+endfunction
+
+function [31:0] INS_CRC(input [3:0] dst, input [3:0] src);
+    begin INS_CRC = {4'd6, dst, src, 20'd0}; end
+endfunction
+
+function [31:0] INS_CALL(input [7:0] target);
+    begin INS_CALL = {4'd7, 20'd0, target}; end
+endfunction
+
+function [31:0] INS_RET;
+    begin INS_RET = {4'd8, 28'd0}; end
+endfunction
+
+function [31:0] INS_XOR(input [3:0] dst, input [3:0] s1, input [3:0] s2);
+    begin INS_XOR = {4'd10, dst, s1, s2, 16'd0}; end
+endfunction
 ```
 
-## Running with Different Clocks
+### Example: Complete UART TX Program
+```verilog
+// Send byte 0x55 at ~9600 baud (1041 cycles @ 10MHz)
+spi_write(0, INS_DRIVE(4'h1, 2'b00, 2'd0));  // Start bit low
+spi_write(1, INS_WAIT(4'd0, 16'd1041));
+spi_write(2, INS_DRIVE(4'h1, 2'b01, 2'd0));  // Bit 0 = 1
+spi_write(3, INS_WAIT(4'd0, 16'd1041));
+spi_write(4, INS_DRIVE(4'h1, 2'b00, 2'd0));  // Bit 1 = 0
+spi_write(5, INS_WAIT(4'd0, 16'd1041));
+spi_write(6, INS_DRIVE(4'h1, 2'b01, 2'd0));  // Bit 2 = 1
+spi_write(7, INS_WAIT(4'd0, 16'd1041));
+spi_write(8, INS_DRIVE(4'h1, 2'b00, 2'd0));  // Bit 3 = 0
+spi_write(9, INS_WAIT(4'd0, 16'd1041));
+spi_write(10, INS_DRIVE(4'h1, 2'b01, 2'd0)); // Bit 4 = 1
+spi_write(11, INS_WAIT(4'd0, 16'd1041));
+spi_write(12, INS_DRIVE(4'h1, 2'b00, 2'd0)); // Bit 5 = 0
+spi_write(13, INS_WAIT(4'd0, 16'd1041));
+spi_write(14, INS_DRIVE(4'h1, 2'b01, 2'd0)); // Bit 6 = 1
+spi_write(15, INS_WAIT(4'd0, 16'd1041));
+spi_write(16, INS_DRIVE(4'h1, 2'b00, 2'd0)); // Bit 7 = 0
+spi_write(17, INS_WAIT(4'd0, 16'd1041));
+spi_write(18, INS_DRIVE(4'h1, 2'b01, 2'd0)); // Stop bit high
+spi_write(19, INS_WAIT(4'd0, 16'd1041));
 
-The core assumes a single clock domain. For different sample rates:
+spi_run(20);  // Execute 20 instructions
+```
+
+## Synthesis with Yosys
+
 ```bash
-iverilog -PCNT_W=20 ...  # Wider counter for slower clocks
-iverilog -PFRAC=2 ...    # More histogram buckets for precision
+# Check if yosys is available
+which yosys
+
+# Synthesize for IHP 130nm (if PDK available)
+yosys -p "
+  read_verilog -I rtl rtl/tt_um_protocol_emu.v
+  read_verilog -I rtl rtl/pdis_sequencer.v
+  read_verilog -I rtl rtl/prog_ram.v
+  read_verilog -I rtl rtl/host_if.v
+  hierarchy -top tt_um_protocol_emu
+  synth -top tt_um_protocol_emu
+  stat
+  write_json synth.json
+"
 ```
 
-## Debug Output
+### Expected Area (from stat)
+- Program RAM (256×32 dual-port): ~16K cells
+- Host IF: ~500 cells  
+- Sequencer: ~1.5K cells
+- Top wrapper: ~200 cells
+- **Total: ~18K cells** (well under 32K budget)
 
-Key signals to monitor:
-- `scan_done` — interval collection complete
-- `list_done` — ranked protocol list ready
-- `result_valid/result_proto/result_conf/result_rank` — top hypotheses
-- `replay_done/replay_error` — sequencer status
-- `prog_len` — compiled program length
-- `seq_pc` — sequencer program counter
+## Pin Mapping (Tiny Tapeout)
 
-## Expected Outputs
+| Port | Bits | Function |
+|------|------|----------|
+| ui_in | 7:0 | Protocol pin inputs |
+| uo_out | 7:0 | Protocol pin outputs |
+| uio_in[0] | - | SPI SCK (host) |
+| uio_in[1] | - | SPI MOSI (host) |
+| uio_in[2] | - | SPI CS_N (host) |
+| uio_out[0] | - | SPI MISO (host) |
+| uio_out[1] | - | sequencer done |
+| uio_out[2] | - | sequencer error |
+| uio_out[4:3] | - | host state |
 
-- **M1**: PASS A-E (histogram/peak tests)
-- **M2**: PASS all UART configs (7/8 bits, N/E/O parity, various baud)
-- **M3**: PASS SPI + I²C frame detection
-- **M4**: PASS fingerprint matching with confidence scores
-- **M5**: PASS pin role assignment (CLK/DATA/CS/TX)
-- **M6**: PASS full discovery→compile→replay cycle
-- **PS/2**: PASS frame detection with parity check
+## Debugging Tips
 
-## Known Limits (from architecture.md)
+### Monitor Sequencer State
+In testbench, access internal signals:
+```verilog
+wire [1:0] seq_st = dut.u_sequencer.st;
+wire [7:0] seq_pc = dut.u_sequencer.pc;
+wire [15:0] reg0 = dut.u_sequencer.reg_file[0];
+// ... reg1, reg2, reg3
+wire seq_done = dut.u_sequencer.done;
+wire seq_error = dut.u_sequencer.error;
+```
 
-- Minimum ~16 clock cycles/bit for reliable baud detection
-- Back-to-back frames need ≥4 bit-times idle gap
-- 2 stop bits indistinguishable from 1 stop + idle
-- 7E1/8O1 and 7N1/8N1 bit-level ambiguous; shortest frame wins
-- Jitter tolerance: ±10% per edge; breaks at ±20%
-- Glitch tolerance: 1/2000 cycles; breaks at 1/500
+### Common Issues
+1. **SPI bit order**: Must send MSB first (bit 63 down to 0)
+2. **WAIT modes**: 
+   - `4'd0` = cycle count
+   - `4'd1` = wait high (mask in [1:0])
+   - `4'd2` = wait low (mask in [1:0])
+   - `4'd3` = wait change (compares to reg0[3:0])
+3. **SAMPLE pin_mask**: Only 4 bits (pins 0-3), use SHIFT to access pins 4-7
+4. **Program length**: Must match RUN command addr field
 
-## Area Budget
+## Extending the ISA
 
-| Block | Est. Cells |
-|-------|------------|
-| M1 (edge_interval + histogram + peak) | ~1.7K |
-| M2 (UART framer + auto-baud) | ~4.7K |
-| M3 (SPI + I²C detect) | ~2.0K |
-| M4 (fingerprint ROM + matcher) | ~2.0K |
-| M5 (pin role discovery) | ~2.0K |
-| M6 (sequencer + compiler) | ~4.0K |
-| Encoding layer | ~1.5K |
-| **Total** | **~20K** (~32K budget, 37% margin) |
+To add new instructions:
+1. Add opcode in `pdis_sequencer.v` localparam
+2. Add case in S_EXECUTE state
+3. Update docs/ISA.md
 
-## Next Steps (Roadmap)
-
-1. **M7** - Synthesis area check with Yosys (`make yosys_area`)
-2. **M8** - Full encoding layer integration (NRZI, Manchester, stuffing for CAN/USB)
-3. **M9** - Vivado P&R (`make vivado_proj`, see docs/VIVADO.md)
-4. **M10** - Stretch: 10BASE-T Ethernet (Manchester + fast clock)
+Reserved opcodes: 0xB-0xF available for future use.

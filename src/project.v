@@ -1,24 +1,10 @@
 /*
- * Protocol Discovery Core - Tiny Tapeout IHP wrapper
+ * Protocol Emulator Core - Tiny Tapeout IHP wrapper
  * Top-level for TT submission
  */
 
 `default_nettype none
 
-module tt_um_protocol_disc (
-    input  wire [7:0] ui_in,    // Dedicated inputs
-    output wire [7:0] uo_out,   // Dedicated outputs
-    input  wire [7:0] uio_in,   // IOs: Input path
-    output wire [7:0] uio_out,  // IOs: Output path
-    output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered
-    input  wire       clk,      // clock
-    input  wire       rst_n     // reset_n - low to reset
-);
-
-  // Include the actual implementation
-  `include "tt_um_protocol_disc.v"
-
-endmodule
+`include "../rtl/tt_um_protocol_emu.v"
 
 `default_nettype wire
