@@ -120,6 +120,10 @@ module tb_emu_spi_detect;
         begin INS_SHIFT = {4'd4, dst, src, cnt, dir, 15'd0}; end
     endfunction
 
+    function [31:0] INS_XOR(input [3:0] dst, input [3:0] src1, input [3:0] src2);
+        begin INS_XOR = {4'd10, dst, src1, src2, 16'd0}; end
+    endfunction
+
     function [31:0] INS_SYNC(input [3:0] pin_mask, input [1:0] sync_mode, input [15:0] timeout);
         begin INS_SYNC = {4'd11, pin_mask, sync_mode, 6'd0, timeout}; end
     endfunction
@@ -149,11 +153,11 @@ module tb_emu_spi_detect;
         wait_clk(2);
 
         // Program includes register initialization via LOAD instructions
-        // PC=0: R0 = bit counter (8)
+        // PC=0: R0 = bit counter (7 = 8 iterations: 7,6,5,4,3,2,1,0)
         spi_write(8'h00, INS_LOAD(4'd0, 16'd7));
         // PC=1: R1 = RX data accumulator (0)
         spi_write(8'h01, INS_LOAD(4'd1, 16'h0000));
-        // PC=2: R2 = temp
+        // PC=2: R2 = temp register for sampled bit
         spi_write(8'h02, INS_LOAD(4'd2, 16'h0000));
         // PC=3: R3 = constant 1 (for done flag)
         spi_write(8'h03, INS_LOAD(4'd3, 16'h0001));
@@ -164,51 +168,58 @@ module tb_emu_spi_detect;
         // PC=5: Wait for SCK rising edge (pin 0) - SYNC_RISE=0
         spi_write(8'h05, INS_SYNC(4'h1, 2'b00, 16'd50000));
         
-        // PC=6: SCK rising edge - sample MOSI (pin 1) into R1
-        spi_write(8'h06, INS_SAMPLE(4'd1, 4'h2));
+        // PC=6: SHIFT R1 left by 1 (make room for new bit)
+        spi_write(8'h06, INS_SHIFT(4'd1, 4'd1, 4'd1, 1'b1));
         
-        // PC=7: Shift R1 left by 1 (prepare for next bit)
-        spi_write(8'h07, INS_SHIFT(4'd1, 4'd1, 4'd1, 1'b1));
+        // PC=7: SAMPLE MOSI (pin 1) into R2
+        spi_write(8'h07, INS_SAMPLE(4'd2, 4'h2));
         
-        // PC=8: Decrement bit counter (R0) and loop back to PC=5 if >0
-        // JUMP_LOOP: loop_reg=R0 (0), target=PC=5
-        spi_write(8'h08, INS_JUMP_LOOP(4'd0, 8'd5));
+        // PC=8: SHIFT R2 right by 1 (move bit from pos 1 to pos 0)
+        spi_write(8'h08, INS_SHIFT(4'd2, 4'd2, 4'd1, 1'b0));
         
-        // PC=9: Done - 8 bits received, signal done on pin 3 (use R3=1, mode=drive from reg)
-        spi_write(8'h09, INS_DRIVE(4'h8, 2'b01, 2'd3));
+        // PC=9: XOR R1 ^ R2 -> R1 (accumulate bit)
+        spi_write(8'h09, INS_XOR(4'd1, 4'd1, 4'd2));
+        
+        // PC=10: JUMP_LOOP R0 -> PC=5 if >0 (loop back to wait for next SCK rise)
+        spi_write(8'h0A, INS_JUMP_LOOP(4'd0, 8'd5));
+        
+        // PC=11: Done - 8 bits received, signal done on pin 3 (use R3=1, mode=drive from reg)
+        spi_write(8'h0B, INS_DRIVE(4'h8, 2'b01, 2'd3));
         
         // Pad remaining
-        spi_write(8'h0A, INS_LOAD(4'd0, 16'd0));
-        spi_write(8'h0B, INS_LOAD(4'd0, 16'd0));
         spi_write(8'h0C, INS_LOAD(4'd0, 16'd0));
         spi_write(8'h0D, INS_LOAD(4'd0, 16'd0));
         spi_write(8'h0E, INS_LOAD(4'd0, 16'd0));
+        spi_write(8'h0F, INS_LOAD(4'd0, 16'd0));
 
-        $display("Program loaded (15 instructions). Starting sequencer...");
-        spi_run(8'd15);
+        $display("Program loaded (16 instructions). Starting sequencer...");
+        spi_run(8'd16);
         
         // Signal that program is loaded and sequencer is running
         program_loaded = 1;
     end
 
     // ============================================================
-    // Initial block 2: Drive SPI transaction in parallel (after program loaded)
+    // Initial block 2: Drive SPI transaction synchronized with sequencer
     // ============================================================
     initial begin
         integer i;
         // Wait for program to be loaded
         while (!program_loaded) @(posedge clk);
         
-        // Give sequencer time to execute LOAD instructions (PC 0-3) and reach PC=4 (SYNC on CS fall)
-        repeat (50) @(negedge clk);  
+        // Wait for sequencer to reach PC=5 in S_SYNC state (executing SYNC from PC=4, waiting for CS fall)
+        while (!(seq_pc == 8'd5 && seq_st == S_SYNC)) @(posedge clk);
+        wait_clk(2);  // Let sequencer settle in S_SYNC
         
-        $display("Starting SPI transaction... (time=%0t)", $time);
+        $display("Starting SPI transaction... (time=%0t, seq_pc=%d, seq_st=%d)", $time, seq_pc, seq_st);
         
-        // CS low (falling edge on pin 2)
+        // CS low (falling edge on pin 2) - this should be detected by SYNC at PC=4
         ui_in[2] = 0;
         $display("  CS LOW (time=%0t)", $time);
-        repeat (200) @(negedge clk);
-        $display("  After CS wait (time=%0t)", $time);
+        // Wait for sequencer to detect CS fall and move to PC=6 (SYNC on SCK rise)
+        while (!(seq_pc == 8'd6 && seq_st == S_SYNC)) @(posedge clk);
+        wait_clk(2);
+        $display("  CS fall detected, sequencer at PC=%d waiting for SCK rise (time=%0t)", seq_pc, $time);
         
         // 8 SCK cycles, MSB first for 0xA5 = 10100101
         // Bit 7: 1
@@ -345,6 +356,29 @@ module tb_emu_spi_detect;
         if (seq_st == S_SYNC || seq_st == S_WAIT) begin
             $display("t=%0t ST=%d PC=%d wait_cnt=%d wait_mode=%b pin_sync=%b pin_prev=%b ui_in=%b", 
                      $time, seq_st, seq_pc, seq_wait_cnt, seq_wait_mode, seq_pin_in_sync, seq_pin_in_prev, ui_in[3:0]);
+        end
+    end
+
+    // Monitor register values during SPI loop (PC 6-10)
+    always @(posedge clk) begin
+        if (seq_pc >= 8'd6 && seq_pc <= 8'd11 && seq_st == S_EXECUTE) begin
+            $display("t=%0t EXEC: PC=%d R0=%d R1=%h R2=%h R3=%h", $time, seq_pc, reg0, reg1, reg2, reg3);
+        end
+    end
+
+    // Monitor SAMPLE instruction and pin_in_sync
+    always @(posedge clk) begin
+        if (seq_pc == 8'd7 && seq_st == S_EXECUTE) begin
+            $display("t=%0t SAMPLE: pin_in=%b pin_in_sync=%b mask=0x2, sampled=%b", 
+                     $time, dut.u_sequencer.pin_in, dut.u_sequencer.pin_in_sync, 
+                     (dut.u_sequencer.pin_in_sync & 8'h02));
+        end
+    end
+
+    // Monitor instruction being fetched
+    always @(posedge clk) begin
+        if (seq_st == S_FETCH && seq_pc >= 8'd6 && seq_pc <= 8'd11) begin
+            $display("t=%0t FETCH: PC=%d instr=%h", $time, seq_pc, dut.u_sequencer.instr);
         end
     end
 
