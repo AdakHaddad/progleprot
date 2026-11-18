@@ -1,9 +1,11 @@
 /*
  * host_if: SPI slave interface for loading program RAM.
+ * Supports configurable DATA_W (16 or 32 bits).
+ * For 16-bit mode, each 32-bit SPI data payload is split into two 16-bit words.
  */
 module host_if #(
     parameter ADDR_W = 8,
-    parameter DATA_W = 32
+    parameter DATA_W = 16
 ) (
     input  wire                    clk,
     input  wire                    rst_n,
@@ -35,6 +37,7 @@ module host_if #(
     reg [31:0] data;
     reg sck_prev;
     reg cs_n_prev;
+    reg [1:0] write_phase; // For 16-bit mode: 0=write low 16 bits, 1=write high 16 bits
 
     wire sck_rise = !sck_prev && spi_sck;
     wire sck_fall = sck_prev && !spi_sck;
@@ -51,20 +54,22 @@ module host_if #(
             data <= 32'd0;
             ram_wr_en <= 1'b0;
             ram_wr_addr <= 8'd0;
-            ram_wr_data <= 32'd0;
+            ram_wr_data <= 16'd0;
             seq_start <= 1'b0;
             seq_prog_len <= 8'd0;
             host_state <= 2'd0;
             sck_prev <= 1'b1;
             cs_n_prev <= 1'b1;
+            write_phase <= 2'd0;
         end else begin
             sck_prev <= spi_sck;
             cs_n_prev <= spi_cs_n;
             ram_wr_en <= 1'b0;
-            // seq_start pulse: assert for 1 cycle when RUN command executes (on CS rise), clear when back to IDLE
+            
+            // seq_start pulse: assert for 1 cycle when RUN command completes on CS rise
             if (st == S_EXECUTE && cmd == CMD_RUN && cs_rise) begin
                 seq_start <= 1'b1;
-            end else if (st == S_IDLE) begin
+            end else begin
                 seq_start <= 1'b0;
             end
 
@@ -92,6 +97,7 @@ module host_if #(
                             addr  = shift_reg[31:16];
                             data  = shift_reg[63:32];
                             $display("t=%0t [HOST_IF] CMD complete: shift_reg=%h cmd=%h addr=%h data=%h", $time, shift_reg, shift_reg[15:8], shift_reg[31:16], shift_reg[63:32]);
+                            write_phase <= 2'd0;
                             st <= S_EXECUTE;
                         end
                     end
@@ -101,31 +107,64 @@ module host_if #(
                 end
 
                 S_EXECUTE: begin
-                    $display("t=%0t [HOST_IF] S_EXECUTE: cmd=%h addr=%h data=%h", $time, cmd, addr, data);
+                    $display("t=%0t [HOST_IF] S_EXECUTE: cmd=%h addr=%h data=%h write_phase=%d cs_rise=%b", $time, cmd, addr, data, write_phase, cs_rise);
                     case (cmd)
                         CMD_WRITE: begin
-                            ram_wr_en <= 1'b1;
-                            ram_wr_addr <= addr[ADDR_W-1:0];
-                            ram_wr_data <= data;
-                            if (addr[ADDR_W-1:0] >= seq_prog_len) begin
-                                seq_prog_len <= addr[ADDR_W-1:0] + 1'b1;
+                            if (DATA_W == 16) begin
+                                // 16-bit mode: split 32-bit data into two 16-bit writes
+                                if (write_phase == 2'd0) begin
+                                    ram_wr_en <= 1'b1;
+                                    ram_wr_addr <= addr[ADDR_W-1:0];
+                                    ram_wr_data <= data[15:0];  // Low 16 bits
+                                    if (addr[ADDR_W-1:0] >= seq_prog_len) begin
+                                        seq_prog_len <= addr[ADDR_W-1:0] + 1'b1;
+                                    end
+                                    write_phase <= 2'd1;
+                                    addr <= addr + 1; // Next address for high 16 bits
+                                end else begin
+                                    ram_wr_en <= 1'b1;
+                                    ram_wr_addr <= addr[ADDR_W-1:0];
+                                    ram_wr_data <= data[31:16]; // High 16 bits
+                                    if (addr[ADDR_W-1:0] >= seq_prog_len) begin
+                                        seq_prog_len <= addr[ADDR_W-1:0] + 1'b1;
+                                    end
+                                    write_phase <= 2'd0;
+                                    st <= S_IDLE;  // Done with both writes, return to IDLE
+                                end
+                            end else begin
+                                // 32-bit mode (legacy)
+                                ram_wr_en <= 1'b1;
+                                ram_wr_addr <= addr[ADDR_W-1:0];
+                                ram_wr_data <= data[DATA_W-1:0];
+                                if (addr[ADDR_W-1:0] >= seq_prog_len) begin
+                                    seq_prog_len <= addr[ADDR_W-1:0] + 1'b1;
+                                end
+                                st <= S_IDLE;
                             end
                             host_state <= 2'd1;
+                            // Wait for CS rise before accepting next command
+                            if (cs_rise) begin
+                                st <= S_IDLE;
+                            end
                         end
                         CMD_RUN: begin
                             seq_prog_len <= addr[ADDR_W-1:0];
                             host_state <= 2'd2;
+                            // Wait for CS rise to trigger seq_start (handled above)
+                            if (cs_rise) begin
+                                st <= S_IDLE;
+                                write_phase <= 2'd0;
+                            end
                         end
                         CMD_READBACK: begin
                             host_state <= 2'd3;
+                            st <= S_IDLE;
                         end
                         default: begin
                             host_state <= 2'd0;
+                            st <= S_IDLE;
                         end
                     endcase
-                    if (cs_rise) begin
-                        st <= S_IDLE;
-                    end
                 end
             endcase
         end
