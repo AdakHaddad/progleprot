@@ -257,6 +257,37 @@ module cpu_core #(
                     dec_rs2  = if_instr[3:0];
                     id_custom_funct <= if_instr[11:8];
                     id_funct <= if_instr[11:8];
+
+                    // Handle custom instructions that write to peripherals
+                    case (if_instr[11:8])
+                        FUNCT_OUT: begin  // OUT pin, value
+                            id_mem_write <= 1'b1;
+                            id_mem_addr <= PIN_BASE + 16'h4;  // REG_OUT
+                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
+                        end
+                        FUNCT_DIR: begin  // DIR pin, direction
+                            id_mem_write <= 1'b1;
+                            id_mem_addr <= PIN_BASE + 16'h0;  // REG_DIR
+                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
+                        end
+                        FUNCT_PINSEL: begin  // PINSEL pin, source
+                            id_mem_write <= 1'b1;
+                            if (if_instr[7:4] < 4) begin
+                                id_mem_addr <= PIN_BASE + 16'h1;  // REG_SEL (pins 0-3)
+                            end else begin
+                                id_mem_addr <= PIN_BASE + 16'h2;  // REG_SEL_H (pins 4-7)
+                            end
+                            id_mem_wdata <= rs2_val;
+                        end
+                        FUNCT_TCFG: begin  // TCFG timer, config
+                            id_mem_write <= 1'b1;
+                            id_mem_addr <= TIMER_BASE + (if_instr[7:4] << 2) + 16'h5;  // REG_MODE
+                            id_mem_wdata <= rs2_val;
+                        end
+                        default: begin
+                            // Other custom instructions (TIME, VERIFY, CAPRD, HALT, etc.) don't write memory
+                        end
+                    endcase
                 end
                 default: begin
                     dec_rd   = 4'd0;
@@ -327,6 +358,37 @@ module cpu_core #(
                                      if_instr[11:8] == FUNCT_VERIFY || 
                                      if_instr[11:8] == FUNCT_CAPRD);
                     id_is_halt <= (if_instr[11:8] == FUNCT_HALT);
+
+                    // Handle custom instructions that write to peripherals
+                    case (if_instr[11:8])
+                        FUNCT_OUT: begin  // OUT pin, value
+                            id_mem_write <= 1'b1;
+                            id_mem_addr <= PIN_BASE + 16'h4;  // REG_OUT
+                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
+                        end
+                        FUNCT_DIR: begin  // DIR pin, direction
+                            id_mem_write <= 1'b1;
+                            id_mem_addr <= PIN_BASE + 16'h0;  // REG_DIR
+                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
+                        end
+                        FUNCT_PINSEL: begin  // PINSEL pin, source
+                            id_mem_write <= 1'b1;
+                            if (if_instr[7:4] < 4) begin
+                                id_mem_addr <= PIN_BASE + 16'h1;  // REG_SEL (pins 0-3)
+                            end else begin
+                                id_mem_addr <= PIN_BASE + 16'h2;  // REG_SEL_H (pins 4-7)
+                            end
+                            id_mem_wdata <= rs2_val;
+                        end
+                        FUNCT_TCFG: begin  // TCFG timer, config
+                            id_mem_write <= 1'b1;
+                            id_mem_addr <= TIMER_BASE + (if_instr[7:4] << 2) + 16'h5;  // REG_MODE
+                            id_mem_wdata <= rs2_val;
+                        end
+                        default: begin
+                            // Other custom instructions (TIME, VERIFY, CAPRD, HALT, etc.) don't write memory
+                        end
+                    endcase
                 end
             endcase
 
