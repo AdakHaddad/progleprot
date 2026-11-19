@@ -1,0 +1,14 @@
+# Yosys synthesis script for Protocol Emulator ASIC
+# Run with: yosys synth.ys
+
+read_verilog -sv rtl/emu_top.v
+read_verilog -sv rtl/cpu_core.v
+read_verilog -sv rtl/timer_coproc.v
+read_verilog -sv rtl/pin_matrix.v
+read_verilog -sv rtl/host_if.v
+read_verilog -sv rtl/prog_ram.v
+
+hierarchy -top emu_top
+synth -top emu_top -run coarse
+stat -tech ihp
+write_json emu_top_synth.json
