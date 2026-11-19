@@ -164,6 +164,6 @@ module tb_emu_top_cpu;
         end
     end
 
-    initial begin #500000; $display("TIMEOUT"); $finish; end
+    initial begin #2000000; $display("TIMEOUT"); $finish; end
 
 endmodule

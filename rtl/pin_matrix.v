@@ -39,12 +39,13 @@ module pin_matrix #(
 );
 
     // Register map
-    localparam REG_DIR    = 4'h0; // 8 bits
-    localparam REG_SEL    = 4'h1; // 32 bits (4 bits × 8) - low
-    localparam REG_SEL_H  = 4'h2; // 32 bits high
-    localparam REG_PULL   = 4'h3; // 16 bits (2 bits × 8)
-    localparam REG_OUT    = 4'h4; // 8 bits (CPU drives when SEL=0)
-    localparam REG_IN     = 4'h5; // 8 bits (read)
+    localparam REG_DIR     = 4'h0; // 8 bits - OR write (set bits)
+    localparam REG_SEL     = 4'h1; // 32 bits (4 bits × 8) - low
+    localparam REG_SEL_H   = 4'h2; // 32 bits high
+    localparam REG_PULL    = 4'h3; // 16 bits (2 bits × 8)
+    localparam REG_OUT     = 4'h4; // 8 bits (CPU drives when SEL=0)
+    localparam REG_IN      = 4'h5; // 8 bits (read)
+    localparam REG_DIR_CLR = 4'h6; // 8 bits - clear bits in DIR
 
     // Pin configuration
     reg [NUM_PINS-1:0] pin_dir;    // 1=out, 0=in
@@ -80,7 +81,8 @@ module pin_matrix #(
             end
         end else if (wr_en) begin
             case (wr_addr)
-                REG_DIR: pin_dir <= wr_data[NUM_PINS-1:0];
+                REG_DIR: pin_dir <= pin_dir | wr_data[NUM_PINS-1:0];
+                REG_DIR_CLR: pin_dir <= pin_dir & ~wr_data[NUM_PINS-1:0];
                 REG_SEL: begin
                             pin_sel[0] <= wr_data[3:0];
                             pin_sel[1] <= wr_data[7:4];
@@ -140,17 +142,18 @@ module pin_matrix #(
     // Read handling
     always @(*) begin
         case (wr_addr)
-            REG_DIR:   rd_data = {8'h00, pin_dir};
-            REG_SEL:   rd_data = {pin_sel[3], pin_sel[2], pin_sel[1], pin_sel[0]};
-            REG_SEL_H: rd_data = {pin_sel[7], pin_sel[6], pin_sel[5], pin_sel[4]};
+            REG_DIR:     rd_data = {8'h00, pin_dir};
+            REG_SEL:     rd_data = {pin_sel[3], pin_sel[2], pin_sel[1], pin_sel[0]};
+            REG_SEL_H:   rd_data = {pin_sel[7], pin_sel[6], pin_sel[5], pin_sel[4]};
             REG_PULL: begin
                 reg [15:0] pull_data;
                 for (i = 0; i < NUM_PINS; i = i + 1) pull_data[i*2 +: 2] = pin_pull[i];
                 rd_data = pull_data;
             end
-            REG_OUT:   rd_data = {8'h00, cpu_pin_out};
-            REG_IN:    rd_data = {8'h00, pin_in_sync};
-            default:   rd_data = 16'h0000;
+            REG_DIR_CLR: rd_data = {8'h00, pin_dir};
+            REG_OUT:     rd_data = {8'h00, cpu_pin_out};
+            REG_IN:      rd_data = {8'h00, pin_in_sync};
+            default:     rd_data = 16'h0000;
         endcase
     end
 

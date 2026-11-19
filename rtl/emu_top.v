@@ -118,7 +118,7 @@ module emu_top #(
         end else if (cpu_pin_wr_en) begin
             case (cpu_pin_wr_addr)
                 4'h4: cpu_pin_out_reg <= cpu_pin_wr_data[NUM_PINS-1:0]; // REG_OUT
-                4'h0: cpu_pin_dir_reg <= cpu_pin_wr_data[NUM_PINS-1:0]; // REG_DIR
+                4'h0: cpu_pin_dir_reg <= cpu_pin_dir_reg | cpu_pin_wr_data[NUM_PINS-1:0]; // REG_DIR (OR)
                 4'h1: begin // REG_SEL low
                     cpu_pin_sel_reg[3:0]   <= cpu_pin_wr_data[3:0];
                     cpu_pin_sel_reg[7:4]   <= cpu_pin_wr_data[7:4];
