@@ -25,7 +25,6 @@ module pin_matrix #(
     // CPU pin outputs (from CPU OUT/DIR instructions)
     input  wire [NUM_PINS-1:0]     cpu_pin_out,
     input  wire [NUM_PINS-1:0]     cpu_pin_dir,
-    input  wire [NUM_PINS-1:0]     cpu_pin_sel,
     // Timer outputs
     input  wire [NUM_PINS-1:0]     timer_nco_clk,
     input  wire [NUM_PINS-1:0]     timer_pwm_out,
@@ -156,8 +155,7 @@ module pin_matrix #(
         
     end
 
-    // Debug in combinational block - check pin_sel[2] value
-    // This will print whenever pin_sel[2] changes
+    // Debug - check pin_sel[2] value
     always @(pin_sel[2]) begin
         $display("t=%0t PIN_MATRIX PIN_SEL[2] CHANGED: pin_sel[2]=%h", $time, pin_sel[2]);
     end

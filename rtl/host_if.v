@@ -53,10 +53,10 @@ module host_if #(
             addr <= 16'd0;
             data <= 32'd0;
             ram_wr_en <= 1'b0;
-            ram_wr_addr <= 8'd0;
-            ram_wr_data <= 16'd0;
+            ram_wr_addr <= {ADDR_W{1'b0}};
+            ram_wr_data <= {DATA_W{1'b0}};
             seq_start <= 1'b0;
-            seq_prog_len <= 8'd0;
+            seq_prog_len <= {ADDR_W{1'b0}};
             host_state <= 2'd0;
             sck_prev <= 1'b1;
             cs_n_prev <= 1'b1;

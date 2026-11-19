@@ -70,12 +70,12 @@ module cpu_core #(
     localparam HOST_BASE   = 16'hF200;
 
     // Pipeline registers
-    reg [1:0]  pipe_st;
-    localparam S_IF   = 2'd0;
-    localparam S_ID   = 2'd1;
-    localparam S_EX   = 2'd2;
-    localparam S_WB   = 2'd3;
-    localparam S_STALL = 2'd4;
+    reg [2:0]  pipe_st;
+    localparam S_IF   = 3'd0;
+    localparam S_ID   = 3'd1;
+    localparam S_EX   = 3'd2;
+    localparam S_WB   = 3'd3;
+    localparam S_STALL = 3'd4;
 
     // CPU run state
     reg cpu_running;
@@ -217,7 +217,7 @@ module cpu_core #(
     end
 
     // Convert byte address (PC) to word address for program memory
-    assign prog_addr = pc[ADDR_W-1:1];
+    assign prog_addr = {1'b0, pc[ADDR_W-1:1]};
 
     // IF/ID register
     always @(posedge clk or negedge rst_n) begin
@@ -344,12 +344,12 @@ module cpu_core #(
                     FUNCT_OUT: begin  // OUT pin, value
                         id_mem_write <= 1'b1;
                         id_mem_addr <= PIN_BASE + 16'h4;  // REG_OUT
-                        id_mem_wdata <= (rs2_val[0] << rs1_val[3:0]);
+                        id_mem_wdata <= (16'b1 << rs1_val[3:0]);
                     end
                     FUNCT_DIR: begin  // DIR pin, direction
                         id_mem_write <= 1'b1;
                         id_mem_addr <= PIN_BASE + 16'h0;  // REG_DIR
-                        id_mem_wdata <= (rs2_val[0] << rs1_val[3:0]);
+                        id_mem_wdata <= (16'b1 << rs1_val[3:0]);
                     end
                     FUNCT_PINSEL: begin  // PINSEL pin, source
                         id_mem_write <= 1'b1;
@@ -358,7 +358,7 @@ module cpu_core #(
                         end else begin
                             id_mem_addr <= PIN_BASE + 16'h2;  // REG_SEL_H (pins 4-7)
                         end
-                        id_mem_wdata <= (rs2_val[3:0] << (rs1_val[3:0] << 2));  // Shift source by pin*4
+                        id_mem_wdata <= ({12'h0, rs2_val[3:0]} << (rs1_val[3:0] << 2));  // Shift source by pin*4
                     end
                     FUNCT_TUNING: begin  // TUNING timer, rs1 (timer), rs2 (tuning value)
                         id_mem_write <= 1'b1;
@@ -366,12 +366,12 @@ module cpu_core #(
                         // rs2[8] = select register (0=low, 1=high)
                         // For REG_TUNING (low 8 bits): write rs2_val[7:0]
                         // For REG_TUNING_H (high 16 bits): write rs2_val[15:0]
-                        id_mem_addr <= TIMER_BASE + (rs1_val[3:0] << 4) + (rs2_val[8] ? 16'h1 : 16'h0);
-                        id_mem_wdata <= rs2_val[8] ? rs2_val[15:0] : rs2_val[7:0];
+                        id_mem_addr <= TIMER_BASE + ({12'h0, rs1_val[3:0]} << 4) + (rs2_val[8] ? 16'h1 : 16'h0);
+                        id_mem_wdata <= rs2_val[8] ? rs2_val[15:0] : {8'h0, rs2_val[7:0]};
                     end
                     FUNCT_TCFG: begin  // TCFG timer, config
                         id_mem_write <= 1'b1;
-                        id_mem_addr <= TIMER_BASE + (rs1_val[3:0] << 4) + 16'h5;  // REG_MODE (16 bytes per timer)
+                        id_mem_addr <= TIMER_BASE + ({12'h0, rs1_val[3:0]} << 4) + 16'h5;  // REG_MODE (16 bytes per timer)
                         id_mem_wdata <= rs2_val;
                     end
                     default: begin

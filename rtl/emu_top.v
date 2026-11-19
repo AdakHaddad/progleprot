@@ -53,6 +53,10 @@ module emu_top #(
     wire              cpu_done;
     wire              cpu_err;
 
+    // Debug outputs from CPU
+    wire [ADDR_W-1:0]  cpu_pc_debug;
+    wire [15:0]        cpu_reg_debug [0:15];
+
     // Timer coprocessor
     wire [NUM_PINS-1:0] timer_nco_clk;
     wire [NUM_PINS-1:0] timer_pwm_out;
@@ -79,7 +83,6 @@ module emu_top #(
     // CPU pin outputs (from custom instructions)
     reg [NUM_PINS-1:0] cpu_pin_out_reg;
     reg [NUM_PINS-1:0] cpu_pin_dir_reg;
-    reg [NUM_PINS-1:0] cpu_pin_sel_reg;
 
     // ------------------------------------------------------------------------
     // CPU Core
@@ -106,7 +109,9 @@ module emu_top #(
         .host_rd_data(cpu_host_rd_data),
         .cpu_start(cpu_start),
         .cpu_done(cpu_done),
-        .cpu_error(cpu_err)
+        .cpu_error(cpu_err),
+        .pc_debug(cpu_pc_debug),
+        .reg_debug(cpu_reg_debug)
     );
 
     // CPU pin register updates (from custom instructions)
@@ -114,23 +119,10 @@ module emu_top #(
         if (!rst_n) begin
             cpu_pin_out_reg <= {NUM_PINS{1'b0}};
             cpu_pin_dir_reg <= {NUM_PINS{1'b0}};
-            cpu_pin_sel_reg <= {NUM_PINS{1'b0}};
         end else if (cpu_pin_wr_en) begin
             case (cpu_pin_wr_addr)
                 4'h4: cpu_pin_out_reg <= cpu_pin_wr_data[NUM_PINS-1:0]; // REG_OUT
                 4'h0: cpu_pin_dir_reg <= cpu_pin_dir_reg | cpu_pin_wr_data[NUM_PINS-1:0]; // REG_DIR (OR)
-                4'h1: begin // REG_SEL low
-                    cpu_pin_sel_reg[3:0]   <= cpu_pin_wr_data[3:0];
-                    cpu_pin_sel_reg[7:4]   <= cpu_pin_wr_data[7:4];
-                    cpu_pin_sel_reg[11:8]  <= cpu_pin_wr_data[11:8];
-                    cpu_pin_sel_reg[15:12] <= cpu_pin_wr_data[15:12];
-                end
-                4'h2: begin // REG_SEL high
-                    cpu_pin_sel_reg[19:16] <= cpu_pin_wr_data[3:0];
-                    cpu_pin_sel_reg[23:20] <= cpu_pin_wr_data[7:4];
-                    cpu_pin_sel_reg[27:24] <= cpu_pin_wr_data[11:8];
-                    cpu_pin_sel_reg[31:28] <= cpu_pin_wr_data[15:12];
-                end
             endcase
         end
     end
@@ -167,7 +159,6 @@ module emu_top #(
         .rd_data(cpu_pin_rd_data),
         .cpu_pin_out(cpu_pin_out_reg),
         .cpu_pin_dir(cpu_pin_dir_reg),
-        .cpu_pin_sel(cpu_pin_sel_reg),
         .timer_nco_clk(timer_nco_clk),
         .timer_pwm_out(timer_pwm_out),
         .pin_in(pin_in),
@@ -213,8 +204,8 @@ module emu_top #(
             end
         end else begin
             if (host_ram_wr_en) begin
-                prog_ram[host_ram_wr_addr] <= host_ram_wr_data;
-                if (host_ram_wr_addr >= prog_len) prog_len <= host_ram_wr_addr + 1;
+                prog_ram[host_ram_wr_addr[10:0]] <= host_ram_wr_data;
+                if (host_ram_wr_addr[10:0] >= prog_len) prog_len <= host_ram_wr_addr[10:0] + 1;
                 $display("t=%0t [EMU_TOP] Host write: addr=%h data=%h prog_len=%d", 
                          $time, host_ram_wr_addr, host_ram_wr_data, prog_len);
             end
@@ -222,7 +213,7 @@ module emu_top #(
     end
 
     // CPU reads from program RAM
-    assign prog_rd_data = prog_ram[prog_rd_addr];
+    assign prog_rd_data = prog_ram[prog_rd_addr[10:0]];
     assign cpu_prog_data = prog_rd_data;
     assign prog_rd_addr = cpu_prog_addr;
 
