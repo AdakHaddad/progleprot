@@ -4,7 +4,7 @@
  * Memory Map:
  *   0x0000-0x0FFF: Program RAM (4KB) - active bank
  *   0x1000-0x17FF: Boot ROM (2KB)
- *   0xF000-0xF07F: Timer Coprocessor (8 timers × 16 bytes)
+ *   0xF000-0xF07F: Timer Coprocessor (8 timers × 16 bytes = 128 bytes, 7 bits)
  *   0xF100-0xF10F: Pin Matrix
  *   0xF200-0xF207: Host Interface
  */
@@ -38,7 +38,7 @@ module emu_top #(
     wire [ADDR_W-1:0] cpu_prog_addr;
     wire [PROG_W-1:0] cpu_prog_data;
     wire              cpu_timer_wr_en;
-    wire [3:0]        cpu_timer_wr_addr;
+    wire [6:0]        cpu_timer_wr_addr;  // 7 bits for timer (8 timers × 16 bytes)
     wire [15:0]       cpu_timer_wr_data;
     wire [15:0]       cpu_timer_rd_data;
     wire              cpu_pin_wr_en;

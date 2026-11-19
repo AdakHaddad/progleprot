@@ -1,28 +1,38 @@
+/*
+ * Testbench for SPI Master firmware on emu_top CPU architecture
+ * Tests SPI TX at 25MHz using NCO timer
+ * SPI pins: MOSI=pin0, MISO=pin1, SCK=pin2, CS=pin3
+ */
 module tb_emu_spi_master;
-    reg clk = 0, rst_n = 0, ena = 1;
-    reg [7:0] ui_in = 0;
+
+    reg clk = 0;
+    reg rst_n = 0;
+    reg [7:0] ui_in = 8'h00;
     reg [7:0] uio_in = 8'hFF;
     wire [7:0] uo_out;
     wire [7:0] uio_out;
     wire [7:0] uio_oe;
 
-    tt_um_protocol_emu dut (
-        .ui_in(ui_in), .uo_out(uo_out), .uio_in(uio_in), .uio_out(uio_out), .uio_oe(uio_oe),
-        .ena(ena), .clk(clk), .rst_n(rst_n)
+    emu_top #(
+        .NUM_PINS(8),
+        .PROG_DEPTH(2048),
+        .PROG_W(16),
+        .ADDR_W(16)
+    ) dut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .pin_in(ui_in),
+        .pin_out(uo_out),
+        .pin_oe(uio_oe[7:0]),
+        .spi_sck(uio_in[0]),
+        .spi_mosi(uio_in[1]),
+        .spi_miso(uio_out[0]),
+        .spi_cs_n(uio_in[2]),
+        .cpu_running(uio_out[1]),
+        .cpu_error(uio_out[2])
     );
 
     always #10 clk = ~clk;
-
-    wire [7:0] pin_out = dut.pin_out;
-    wire [7:0] pin_oe  = dut.pin_oe;
-    wire [7:0] seq_pc  = dut.seq_pc;
-    wire       seq_done = dut.seq_done;
-    wire       seq_error = dut.seq_error;
-    wire [1:0] seq_st = dut.u_sequencer.st;
-    wire [15:0] reg0 = dut.u_sequencer.reg_file[0];
-    wire [15:0] reg1 = dut.u_sequencer.reg_file[1];
-    wire [15:0] reg2 = dut.u_sequencer.reg_file[2];
-    wire [15:0] reg3 = dut.u_sequencer.reg_file[3];
 
     task wait_clk(input integer n);
         integer j;
@@ -73,141 +83,213 @@ module tb_emu_spi_master;
     endtask
 
     // Instruction encoding
-    function [31:0] INS_LOAD(input [3:0] dst, input [15:0] val);
-        begin INS_LOAD = {4'd9, dst, 8'd0, val}; end
+    function [15:0] INS_ADDI(input [3:0] rd, input [7:0] imm);
+        begin INS_ADDI = (4'h8 << 12) | (rd << 8) | imm; end
     endfunction
 
-    function [31:0] INS_DRIVE(input [3:0] mask, input [1:0] mode, input [1:0] reg_idx);
-        begin INS_DRIVE = {4'd1, mask, mode, reg_idx, 20'd0}; end
+    function [15:0] INS_ORI(input [3:0] rd, input [7:0] imm);
+        begin INS_ORI = (4'h9 << 12) | (rd << 8) | imm; end
     endfunction
 
-    function [31:0] INS_WAIT(input [3:0] wait_mode, input [15:0] count);
-        begin INS_WAIT = {4'd2, wait_mode, 12'd0, count}; end
+    // Custom instruction funct codes
+    localparam FUNCT_OUT    = 4'h0;
+    localparam FUNCT_DIR    = 4'h1;
+    localparam FUNCT_WAIT   = 4'h2;
+    localparam FUNCT_TCFG   = 4'h5;
+    localparam FUNCT_TUNING = 4'h6;
+    localparam FUNCT_PINSEL = 4'h7;
+    localparam FUNCT_HALT   = 4'hF;
+
+    function [15:0] INS_OUT(input [3:0] pin_reg, input [3:0] val_reg);
+        begin INS_OUT = (4'hF << 12) | (FUNCT_OUT << 8) | (pin_reg << 4) | val_reg; end
     endfunction
 
-    function [31:0] INS_SAMPLE(input [3:0] dst, input [3:0] mask);
-        begin INS_SAMPLE = {4'd3, dst, mask, 20'd0}; end
+    function [15:0] INS_DIR(input [3:0] pin_reg, input [3:0] dir_reg);
+        begin INS_DIR = (4'hF << 12) | (FUNCT_DIR << 8) | (pin_reg << 4) | dir_reg; end
     endfunction
 
-    function [31:0] INS_BRANCH(input [3:0] cond, input [7:0] target);
-        begin INS_BRANCH = {4'd5, cond, 12'd0, target}; end
+    function [15:0] INS_WAIT(input [3:0] timer_reg, input [3:0] cycles_reg);
+        begin INS_WAIT = (4'hF << 12) | (FUNCT_WAIT << 8) | (timer_reg << 4) | cycles_reg; end
     endfunction
 
-    // SPI Master pins: Pin 0=SCK, Pin 1=MOSI, Pin 2=CS_N (active low), Pin 3=MISO (input)
-    // Mode 0: CPOL=0, CPHA=0 - SCK idle low, sample on rising edge
+    function [15:0] INS_TCFG(input [3:0] timer_reg, input [3:0] config_reg);
+        begin INS_TCFG = (4'hF << 12) | (FUNCT_TCFG << 8) | (timer_reg << 4) | config_reg; end
+    endfunction
 
+    function [15:0] INS_TUNING(input [3:0] timer_reg, input [3:0] tuning_reg);
+        begin INS_TUNING = (4'hF << 12) | (FUNCT_TUNING << 8) | (timer_reg << 4) | tuning_reg; end
+    endfunction
+
+    function [15:0] INS_PINSEL(input [3:0] pin_reg, input [3:0] src_reg);
+        begin INS_PINSEL = (4'hF << 12) | (FUNCT_PINSEL << 8) | (pin_reg << 4) | src_reg; end
+    endfunction
+
+    function [15:0] INS_HALT();
+        begin INS_HALT = 16'hFFFF; end
+    endfunction
+
+    function [15:0] INS_NOP();
+        begin INS_NOP = 16'h0000; end
+    endfunction
+
+    // ============================================================
+    // Initial block: Load SPI Master firmware and start CPU
+    // ============================================================
     initial begin
         rst_n = 0;
         wait_clk(4);
         rst_n = 1;
         wait_clk(4);
 
-        $display("=== Protocol Emulator SPI Master Test ===");
+        $display("=== SPI Master Test (CPU Architecture) ===");
 
-        // Simulated slave MISO input on pin 3 (ui_in[3])
-        // We'll drive it from testbench to simulate slave response
+        wait_clk(2);
 
-        // Program: Send 0xA5 (10100101), receive 1 byte
-        // Uses loop with BRANCH for 8 bits
+        // Register allocation:
+        // x4  = Timer index (0)
+        // x5  = MODE_NCO_CLK (3)
+        // x6  = MOSI pin (0)
+        // x7  = MISO pin (1) 
+        // x8  = SCK pin (2)
+        // x9  = CS pin (3)
+        // x10 = Output direction (1)
+        // x11 = Input direction (0)
+        // x12 = Bit counter (8)
+        // x13 = Wait cycles (1)
+        // x14 = Constant 1
+        // x15 = Constant 0 / Tuning high byte selector
+        // xE  = Tuning low byte (0x00)
+        // xF  = Tuning high byte (0x80 with bit 8=1 for REG_TUNING_H)
+        // xD  = PINSEL source for SCK (0x01 = Timer 0 NCO, shifted by CPU)
+
+        // ---- Program: Initialize NCO for 25MHz ----
+        // NCO increment = 0x800000 (25MHz @ 50MHz = 1/2 clock)
+        // Write tuning: REG_TUNING_H = 0x80 (via ADDI 0x80 -> 0xFF80, bit 8=1), REG_TUNING = 0x00
+        spi_write(16'h0000, {INS_ADDI(4'h5, 8'h03), INS_ADDI(4'h4, 8'h00)});  // x4=timer0, x5=MODE=3
+        spi_write(16'h0002, {INS_ADDI(4'h6, 8'h00), INS_ADDI(4'h7, 8'h01)});  // x6=MOSI(0), x7=MISO(1)
+        spi_write(16'h0004, {INS_ADDI(4'h8, 8'h02), INS_ADDI(4'h9, 8'h03)});  // x8=SCK(2), x9=CS(3)
+        spi_write(16'h0006, {INS_ADDI(4'hA, 8'h01), INS_ADDI(4'hB, 8'h00)});  // x10=dir=1, x11=dir=0
+        spi_write(16'h0008, {INS_ADDI(4'hC, 8'h08), INS_ADDI(4'hD, 8'h01)});  // x12=8 bits, x13=wait1
+        spi_write(16'h000A, {INS_ADDI(4'hE, 8'h00), INS_ADDI(4'hF, 8'h00)});  // x14=1, x15=0
+        // PINSEL source for SCK (pin 2): needs source=1 (shifted by CPU to bits [11:8])
+        spi_write(16'h000C, {INS_ADDI(4'hD, 8'h01), INS_NOP()});  // xD=0x01 (source=Timer0 NCO)
+
+        // ---- Write NCO tuning word to timer 0 ----
+        // Write REG_TUNING (low byte) = 0x00 using xE (ORI for zero-extend, bit 8 = 0)
+        spi_write(16'h000E, {INS_TUNING(4'h4, 4'hE), INS_ORI(4'hE, 8'h00)});
+        // Write REG_TUNING_H (high byte) = 0x80 using xF (ADDI for sign-ext, gives 0xFF80, bit 8 = 1)
+        spi_write(16'h0010, {INS_TUNING(4'h4, 4'hF), INS_ADDI(4'hF, 8'h80)});
+
+        // ---- Configure timer 0 NCO mode ----
+        spi_write(16'h0012, {INS_TCFG(4'h4, 4'h5), INS_NOP()});   // TCFG timer0 MODE=3
+
+        // ---- Set up pin directions (MOSI, SCK, CS = output; MISO = input) ----
+        spi_write(16'h0014, {INS_DIR(4'h6, 4'hA), INS_DIR(4'h8, 4'hA)});  // DIR MOSI, DIR SCK
+        spi_write(16'h0016, {INS_DIR(4'h9, 4'hA), INS_DIR(4'h7, 4'hB)});  // DIR CS, DIR MISO (input)
         
-        // R0 = bit counter (8)
-        spi_write(8'h00, INS_LOAD(4'd0, 16'd8));
-        // R1 = TX data (0xA5)
-        spi_write(8'h01, INS_LOAD(4'd1, 16'h00A5));
-        // R2 = RX data accumulator (0)
-        spi_write(8'h02, INS_LOAD(4'd2, 16'h0000));
-        // R3 = current bit mask (0x80 for MSB first)
-        spi_write(8'h03, INS_LOAD(4'd3, 16'h0080));
+        // ---- Pin select: SCK (pin 2) driven by Timer 0 NCO (source=1 in bits [11:8]) ----
+        spi_write(16'h0018, {INS_PINSEL(4'h8, 4'hD), INS_NOP()});  // PINSEL SCK, xD=0x01
 
-        // CS low (Pin 2 = 0)
-        spi_write(8'h04, INS_DRIVE(4'h4, 2'b00, 2'd0));
-        spi_write(8'h05, INS_WAIT(4'd0, 16'd5));
+        // ---- Initial state: CS high, MOSI low ----
+        spi_write(16'h001A, {INS_OUT(4'h9, 4'hE), INS_OUT(4'h6, 4'hF)});  // CS=1, MOSI=0
 
-        // Loop label: PC=6
-        // SCK low (Pin 0 = 0) - already low from reset
-        spi_write(8'h06, INS_DRIVE(4'h1, 2'b00, 2'd0));
+        // ---- Send 8 bits: 0xA5 = 10100101 (MSB first) ----
+        // Bit 7: 1
+        spi_write(16'h001C, {INS_OUT(4'h9, 4'hF), INS_OUT(4'h6, 4'hE)});  // CS=0, MOSI=1
+        spi_write(16'h001E, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // Wait 2 cycles (SCK rise+fall)
         
-        // Setup MOSI (Pin 1) from R1 & R3
-        // Check if current bit is set: R1 & R3 != 0
-        spi_write(8'h07, INS_DRIVE(4'h2, 2'b11, 2'd1)); // DRV_REG mode - uses R1[3:0]... wait, need different approach
+        // Bit 6: 0
+        spi_write(16'h0020, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
+        spi_write(16'h0022, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
         
-        // Better: Pre-load MOSI bit into a register using SHIFT/XOR
-        // For simplicity, let's do explicit bit-by-bit without loop
-        // We'll just do 3 bits to demonstrate
-
-        // Bit 7 (MSB = 1): MOSI high
-        spi_write(8'h07, INS_DRIVE(4'h2, 2'b01, 2'd0)); // MOSI high
-        spi_write(8'h08, INS_WAIT(4'd0, 16'd5));
-        spi_write(8'h09, INS_DRIVE(4'h1, 2'b01, 2'd0)); // SCK high
-        spi_write(8'h0A, INS_WAIT(4'd0, 16'd5));
-        spi_write(8'h0B, INS_SAMPLE(4'd2, 4'h8)); // Sample MISO (pin 3) into R2
-        spi_write(8'h0C, INS_DRIVE(4'h1, 2'b00, 2'd0)); // SCK low
-        spi_write(8'h0D, INS_WAIT(4'd0, 16'd5));
-
-        // Bit 6 (0): MOSI low
-        spi_write(8'h0E, INS_DRIVE(4'h2, 2'b00, 2'd0)); // MOSI low
-        spi_write(8'h0F, INS_WAIT(4'd0, 16'd5));
-        spi_write(8'h10, INS_DRIVE(4'h1, 2'b01, 2'd0)); // SCK high
-        spi_write(8'h11, INS_WAIT(4'd0, 16'd5));
-        spi_write(8'h12, INS_SAMPLE(4'd2, 4'h8)); // Sample MISO
-        spi_write(8'h13, INS_DRIVE(4'h1, 2'b00, 2'd0)); // SCK low
-        spi_write(8'h14, INS_WAIT(4'd0, 16'd5));
-
-        // Bit 5 (1): MOSI high
-        spi_write(8'h15, INS_DRIVE(4'h2, 2'b01, 2'd0)); // MOSI high
-        spi_write(8'h16, INS_WAIT(4'd0, 16'd5));
-        spi_write(8'h17, INS_DRIVE(4'h1, 2'b01, 2'd0)); // SCK high
-        spi_write(8'h18, INS_WAIT(4'd0, 16'd5));
-        spi_write(8'h19, INS_SAMPLE(4'd2, 4'h8)); // Sample MISO
-        spi_write(8'h1A, INS_DRIVE(4'h1, 2'b00, 2'd0)); // SCK low
-        spi_write(8'h1B, INS_WAIT(4'd0, 16'd5));
-
-        // CS high (end transaction)
-        spi_write(8'h1C, INS_DRIVE(4'h4, 2'b01, 2'd0)); // CS high
-        spi_write(8'h1D, INS_WAIT(4'd0, 16'd5));
-
-        $display("Program loaded (%d instructions). Starting sequencer...", 30);
-
-        // Simulate slave MISO: send 0x5A back
-        // We'll toggle ui_in[3] during SCK high phases
-        // For now just keep it high
-        ui_in[3] = 1; // MISO high
-
-        spi_run(8'd30);
-
-        wait_clk(200);
+        // Bit 5: 1
+        spi_write(16'h0024, {INS_OUT(4'h6, 4'hE), INS_WAIT(4'h4, 4'hD)});  // MOSI=1, wait
+        spi_write(16'h0026, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
         
-        $display("=== Results ===");
-        $display("Final PC: %d", seq_pc);
-        $display("Done: %b, Error: %b", seq_done, seq_error);
-        $display("R0 (counter): %h", reg0);
-        $display("R1 (TX): %h", reg1);
-        $display("R2 (RX): %h", reg2);
-        $display("R3 (mask): %h", reg3);
+        // Bit 4: 0
+        spi_write(16'h0028, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
+        spi_write(16'h002A, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
+        
+        // Bit 3: 0
+        spi_write(16'h002C, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
+        spi_write(16'h002E, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
+        
+        // Bit 2: 1
+        spi_write(16'h0030, {INS_OUT(4'h6, 4'hE), INS_WAIT(4'h4, 4'hD)});  // MOSI=1, wait
+        spi_write(16'h0032, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
+        
+        // Bit 1: 0
+        spi_write(16'h0034, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
+        spi_write(16'h0036, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
+        
+        // Bit 0: 1
+        spi_write(16'h0038, {INS_OUT(4'h6, 4'hE), INS_WAIT(4'h4, 4'hD)});  // MOSI=1, wait
+        spi_write(16'h003A, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
 
-        $display("Test complete");
+        // ---- CS high (end transaction) ----
+        spi_write(16'h003C, {INS_OUT(4'h9, 4'hE), INS_HALT()});  // CS=1, HALT
+
+        $display("Program loaded (31 instructions). Starting CPU...");
+        spi_run(16'd62);  // 31 instruction pairs = 62 instructions
+
+        wait_clk(50000);
+
+        $display("=== CPU Registers ===");
+        $display("R4 (timer): %h", dut.u_cpu.reg_debug[4]);
+        $display("R5 (MODE): %h", dut.u_cpu.reg_debug[5]);
+        $display("R6 (MOSI): %h", dut.u_cpu.reg_debug[6]);
+        $display("R7 (MISO): %h", dut.u_cpu.reg_debug[7]);
+        $display("R8 (SCK): %h", dut.u_cpu.reg_debug[8]);
+        $display("R9 (CS): %h", dut.u_cpu.reg_debug[9]);
+        $display("R10 (dir_out): %h", dut.u_cpu.reg_debug[10]);
+        $display("R11 (dir_in): %h", dut.u_cpu.reg_debug[11]);
+        $display("R12 (bit cnt): %h", dut.u_cpu.reg_debug[12]);
+        $display("R13 (wait): %h", dut.u_cpu.reg_debug[13]);
+        $display("R14 (const1): %h", dut.u_cpu.reg_debug[14]);
+        $display("R15 (const0/tuning): %h", dut.u_cpu.reg_debug[15]);
+        $display("RD (pin_sel src): %h", dut.u_cpu.reg_debug[13]);
+        $display("PC: %h", dut.u_cpu.pc_debug);
+        
+        $display("=== Pin Status ===");
+        $display("Pin 0 (MOSI) out: %b, OE: %b", uo_out[0], uio_oe[0]);
+        $display("Pin 1 (MISO) out: %b, OE: %b", uo_out[1], uio_oe[1]);
+        $display("Pin 2 (SCK) out: %b, OE: %b", uo_out[2], uio_oe[2]);
+        $display("Pin 3 (CS) out: %b, OE: %b", uo_out[3], uio_oe[3]);
+        
+        $display("=== Timer Status ===");
+        $display("Timer 0 NCO clk: %b", dut.u_timers.nco_clk_out[0]);
+        $display("Timer 0 mode: %h", dut.u_timers.mode[0]);
+        $display("Timer 0 tuning: %h", dut.u_timers.tuning_word[0]);
+
+        $display("=== Test Complete ===");
         $finish;
     end
 
-    // Simulate SPI slave MISO response
-    // Drive MISO (ui_in[3]) when SCK is high and CS is low
+    // Monitor SPI pins
     always @(posedge clk) begin
-        // Pin 2 = CS (active low), Pin 0 = SCK
-        if (pin_oe[2] && !pin_out[2] && pin_oe[0] && pin_out[0]) begin
-            // SCK high, CS low - slave drives MISO
-            // Simulate slave sending 0x5A (01011010) - MSB first
-            // This is just a simple toggle for demo
-            ui_in[3] <= ~ui_in[3];
+        if (dut.u_cpu.cpu_running && (uio_oe[0] || uio_oe[2] || uio_oe[3])) begin
+            $display("t=%0t MOSI=%b SCK=%b CS=%b (PC=%h) nco=%b", 
+                     $time, uo_out[0], uo_out[2], uo_out[3], dut.u_cpu.pc_debug, 
+                     dut.u_timers.nco_clk_out[0]);
         end
     end
 
-    // Monitor
+    // Monitor CPU pin writes
     always @(posedge clk) begin
-        if (pin_oe[0] || pin_oe[1] || pin_oe[2]) begin
-            $display("t=%0t SCK=%b MOSI=%b CS_N=%b MISO_in=%b pc=%d", 
-                     $time, pin_out[0], pin_out[1], pin_out[2], ui_in[3], seq_pc);
+        if (dut.u_cpu.cpu_running && dut.u_cpu.pin_wr_en) begin
+            $display("t=%0t CPU PIN WR: addr=%h data=%h (PC=%h)", 
+                     $time, dut.u_cpu.pin_wr_addr, dut.u_cpu.pin_wr_data, dut.u_cpu.pc_debug);
         end
     end
 
-    initial begin #100000; $display("TIMEOUT"); $finish; end
+    // Monitor Timer writes
+    always @(posedge clk) begin
+        if (dut.u_cpu.cpu_running && dut.u_cpu.timer_wr_en) begin
+            $display("t=%0t CPU TIMER WR: addr=%h data=%h (PC=%h)", 
+                     $time, dut.u_cpu.timer_wr_addr, dut.u_cpu.timer_wr_data, dut.u_cpu.pc_debug);
+        end
+    end
+
+    initial begin #5000000; $display("TIMEOUT"); $finish; end
+
 endmodule

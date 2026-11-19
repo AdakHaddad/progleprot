@@ -1,16 +1,16 @@
 /*
  * timer_coproc: 8-channel timer coprocessor with NCO frequency synthesis.
  * Each channel: 24-bit NCO, 16-bit counter, capture, compare, events.
- * Memory-mapped at 0xF000-0xF07F (8 timers × 16 bytes)
+ * Memory-mapped at 0xF000-0xF07F (8 timers × 16 bytes = 128 bytes, 7 bits)
  */
 module timer_coproc #(
     parameter NUM_TIMERS = 8
 ) (
     input  wire                    clk,
     input  wire                    rst_n,
-    // Memory-mapped interface
+    // Memory-mapped interface - 7 bits for 128 bytes (8 timers × 16 bytes)
     input  wire                    wr_en,
-    input  wire [3:0]              wr_addr,
+    input  wire [6:0]              wr_addr,
     input  wire [15:0]             wr_data,
     output reg  [15:0]             rd_data,
     // Pin event inputs (from pin matrix)
@@ -22,7 +22,7 @@ module timer_coproc #(
     output reg [NUM_TIMERS-1:0]    timer_event
 );
 
-    // Register offsets per timer
+    // Register offsets per timer (4 bits: 16 bytes per timer = 8 registers × 2 bytes)
     localparam REG_TUNING   = 4'h0; // 24-bit: [1:0] + next reg
     localparam REG_TUNING_H = 4'h1; // 24-bit high 16 bits
     localparam REG_COUNTER  = 4'h2; // 16-bit
@@ -85,26 +85,26 @@ module timer_coproc #(
             // Default: clear event outputs
             timer_event <= {NUM_TIMERS{1'b0}};
 
-            // Handle writes
+            // Handle writes - wr_addr[6:3] = timer index, wr_addr[3:0] = register offset
             if (wr_en) begin
-                case (wr_addr[1:0])
+                case (wr_addr[3:0])
                     REG_TUNING: begin
-                        tuning_word[wr_addr[5:2]][7:0] <= wr_data[7:0];
+                        tuning_word[wr_addr[6:3]][7:0] <= wr_data[7:0];
                     end
                     REG_TUNING_H: begin
-                        tuning_word[wr_addr[5:2]][23:8] <= wr_data[15:0];
+                        tuning_word[wr_addr[6:3]][23:8] <= wr_data[15:0];
                     end
                     REG_COUNTER: begin
-                        counter[wr_addr[5:2]] <= wr_data;
+                        counter[wr_addr[6:3]] <= wr_data;
                     end
                     REG_COMPARE: begin
-                        compare[wr_addr[5:2]] <= wr_data;
+                        compare[wr_addr[6:3]] <= wr_data;
                     end
                     REG_MODE: begin
-                        mode[wr_addr[5:2]] <= wr_data[7:0];
+                        mode[wr_addr[6:3]] <= wr_data[7:0];
                     end
                     REG_EV_EN: begin
-                        ev_enable[wr_addr[5:2]] <= wr_data[7:0];
+                        ev_enable[wr_addr[6:3]] <= wr_data[7:0];
                     end
                 endcase
             end
@@ -208,15 +208,15 @@ module timer_coproc #(
     // Read handling
     always @(*) begin
         rd_data = 16'h0000;
-        case (wr_addr[1:0])
-            REG_TUNING:   rd_data = {8'h00, tuning_word[wr_addr[5:2]][7:0]};
-            REG_TUNING_H: rd_data = tuning_word[wr_addr[5:2]][23:8];
-            REG_COUNTER:  rd_data = counter[wr_addr[5:2]];
-            REG_CAPTURE:  rd_data = capture[wr_addr[5:2]];
-            REG_COMPARE:  rd_data = compare[wr_addr[5:2]];
-            REG_MODE:     rd_data = {8'h00, mode[wr_addr[5:2]]};
-            REG_EV_EN:    rd_data = {8'h00, ev_enable[wr_addr[5:2]]};
-            REG_EV_ST:    rd_data = {8'h00, ev_status[wr_addr[5:2]]};
+        case (wr_addr[3:0])
+            REG_TUNING:   rd_data = {8'h00, tuning_word[wr_addr[6:3]][7:0]};
+            REG_TUNING_H: rd_data = tuning_word[wr_addr[6:3]][23:8];
+            REG_COUNTER:  rd_data = counter[wr_addr[6:3]];
+            REG_CAPTURE:  rd_data = capture[wr_addr[6:3]];
+            REG_COMPARE:  rd_data = compare[wr_addr[6:3]];
+            REG_MODE:     rd_data = {8'h00, mode[wr_addr[6:3]]};
+            REG_EV_EN:    rd_data = {8'h00, ev_enable[wr_addr[6:3]]};
+            REG_EV_ST:    rd_data = {8'h00, ev_status[wr_addr[6:3]]};
             default:      rd_data = 16'h0000;
         endcase
     end
@@ -225,8 +225,8 @@ module timer_coproc #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             // handled above
-        end else if (!wr_en && wr_addr[1:0] == REG_EV_ST) begin
-            ev_status[wr_addr[5:2]] <= 8'h00;
+        end else if (!wr_en && wr_addr[3:0] == REG_EV_ST) begin
+            ev_status[wr_addr[6:3]] <= 8'h00;
         end
     end
 

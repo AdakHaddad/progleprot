@@ -80,27 +80,43 @@ module pin_matrix #(
                 pin_pull[i] <= 2'h0;
             end
         end else if (wr_en) begin
+            $display("t=%0t PIN_MATRIX WR: addr=%h data=%h", $time, wr_addr, wr_data);
             case (wr_addr)
-                REG_DIR: pin_dir <= pin_dir | wr_data[NUM_PINS-1:0];
-                REG_DIR_CLR: pin_dir <= pin_dir & ~wr_data[NUM_PINS-1:0];
+                REG_DIR: begin
+                    pin_dir <= pin_dir | wr_data[NUM_PINS-1:0];
+                    $display("  DIR: pin_dir=%b", pin_dir | wr_data[NUM_PINS-1:0]);
+                end
+                REG_DIR_CLR: begin
+                    pin_dir <= pin_dir & ~wr_data[NUM_PINS-1:0];
+                    $display("  DIR_CLR: pin_dir=%b", pin_dir & ~wr_data[NUM_PINS-1:0]);
+                end
                 REG_SEL: begin
-                            pin_sel[0] <= wr_data[3:0];
-                            pin_sel[1] <= wr_data[7:4];
-                            pin_sel[2] <= wr_data[11:8];
-                            pin_sel[3] <= wr_data[15:12];
-                        end
+                    pin_sel[0] <= wr_data[3:0];
+                    pin_sel[1] <= wr_data[7:4];
+                    pin_sel[2] <= wr_data[11:8];
+                    pin_sel[3] <= wr_data[15:12];
+                    $display("  SEL low: pin_sel[0]=%h pin_sel[1]=%h pin_sel[2]=%h pin_sel[3]=%h", 
+                             wr_data[3:0], wr_data[7:4], wr_data[11:8], wr_data[15:12]);
+                end
                 REG_SEL_H: begin
-                            pin_sel[4] <= wr_data[3:0];
-                            pin_sel[5] <= wr_data[7:4];
-                            pin_sel[6] <= wr_data[11:8];
-                            pin_sel[7] <= wr_data[15:12];
-                        end
+                    pin_sel[4] <= wr_data[3:0];
+                    pin_sel[5] <= wr_data[7:4];
+                    pin_sel[6] <= wr_data[11:8];
+                    pin_sel[7] <= wr_data[15:12];
+                    $display("  SEL high: pin_sel[4]=%h pin_sel[5]=%h pin_sel[6]=%h pin_sel[7]=%h", 
+                             wr_data[3:0], wr_data[7:4], wr_data[11:8], wr_data[15:12]);
+                end
                 REG_PULL: begin
-                            for (i = 0; i < NUM_PINS; i = i + 1) begin
-                                pin_pull[i] <= wr_data[i*2 +: 2];
-                            end
-                        end
-                REG_OUT: ; // CPU pin out is direct input, not registered here
+                    for (i = 0; i < NUM_PINS; i = i + 1) begin
+                        pin_pull[i] <= wr_data[i*2 +: 2];
+                    end
+                end
+                REG_OUT: begin
+                    $display("  OUT write (ignored, direct input)");
+                end
+                default: begin
+                    $display("  UNKNOWN addr=%h", wr_addr);
+                end
             endcase
         end
     end
@@ -137,6 +153,13 @@ module pin_matrix #(
                 pin_out[i] = 1'b0;
             end
         end
+        
+    end
+
+    // Debug in combinational block - check pin_sel[2] value
+    // This will print whenever pin_sel[2] changes
+    always @(pin_sel[2]) begin
+        $display("t=%0t PIN_MATRIX PIN_SEL[2] CHANGED: pin_sel[2]=%h", $time, pin_sel[2]);
     end
 
     // Read handling

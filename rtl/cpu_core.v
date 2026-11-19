@@ -20,7 +20,7 @@ module cpu_core #(
     input  wire [15:0]             prog_data,
     // Timer coprocessor interface
     output wire                    timer_wr_en,
-    output wire [3:0]              timer_wr_addr,
+    output wire [6:0]              timer_wr_addr,
     output wire [15:0]             timer_wr_data,
     input  wire [15:0]             timer_rd_data,
     // Pin matrix interface
@@ -56,11 +56,12 @@ module cpu_core #(
     localparam FUNCT_WAITE  = 4'h3;  // WAITE timer, rs1 (pin event)
     localparam FUNCT_TIME   = 4'h4;  // TIME rd, timer (timer in rs1[3:0])
     localparam FUNCT_TCFG   = 4'h5;  // TCFG timer, rs1, rs2
-    localparam FUNCT_PINSEL = 4'h6;  // PINSEL pin, rs1
-    localparam FUNCT_EVEN   = 4'h7;  // EVEN timer, rs1
-    localparam FUNCT_SWAP   = 4'h8;  // SWAP (trigger bank swap)
-    localparam FUNCT_VERIFY = 4'h9;  // VERIFY rd (read CRC)
-    localparam FUNCT_CAPRD  = 4'hA;  // CAPRD rd, timer
+    localparam FUNCT_TUNING  = 4'h6;  // TUNING timer, rs1, rs2
+    localparam FUNCT_PINSEL = 4'h7;  // PINSEL pin, rs1
+    localparam FUNCT_EVEN   = 4'h8;  // EVEN timer, rs1
+    localparam FUNCT_SWAP   = 4'h9;  // SWAP (trigger bank swap)
+    localparam FUNCT_VERIFY = 4'hA;  // VERIFY rd (read CRC)
+    localparam FUNCT_CAPRD  = 4'hB;  // CAPRD rd, timer
     localparam FUNCT_HALT   = 4'hF;  // HALT - stop CPU
 
     // Peripheral base addresses
@@ -357,7 +358,16 @@ module cpu_core #(
                         end else begin
                             id_mem_addr <= PIN_BASE + 16'h2;  // REG_SEL_H (pins 4-7)
                         end
-                        id_mem_wdata <= rs2_val;
+                        id_mem_wdata <= (rs2_val[3:0] << (rs1_val[3:0] << 2));  // Shift source by pin*4
+                    end
+                    FUNCT_TUNING: begin  // TUNING timer, rs1 (timer), rs2 (tuning value)
+                        id_mem_write <= 1'b1;
+                        // Timer address: [6:3]=timer_idx, [3:0]=REG_TUNING(0) or REG_TUNING_H(1)
+                        // rs2[8] = select register (0=low, 1=high)
+                        // For REG_TUNING (low 8 bits): write rs2_val[7:0]
+                        // For REG_TUNING_H (high 16 bits): write rs2_val[15:0]
+                        id_mem_addr <= TIMER_BASE + (rs1_val[3:0] << 4) + (rs2_val[8] ? 16'h1 : 16'h0);
+                        id_mem_wdata <= rs2_val[8] ? rs2_val[15:0] : rs2_val[7:0];
                     end
                     FUNCT_TCFG: begin  // TCFG timer, config
                         id_mem_write <= 1'b1;
@@ -492,7 +502,7 @@ module cpu_core #(
 
     // Peripheral write enables (from EX stage)
     assign timer_wr_en = (cpu_running && pipe_st == S_EX) && ex_mem_write && (ex_mem_addr >= TIMER_BASE) && (ex_mem_addr < PIN_BASE);
-    assign timer_wr_addr = ex_mem_addr[3:0];
+    assign timer_wr_addr = ex_mem_addr[6:0];
     assign timer_wr_data = ex_mem_wdata;
 
     assign pin_wr_en = (cpu_running && pipe_st == S_EX) && ex_mem_write && (ex_mem_addr >= PIN_BASE) && (ex_mem_addr < HOST_BASE);
