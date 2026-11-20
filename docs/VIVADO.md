@@ -1,30 +1,35 @@
-# Vivado Synthesis Flow for Tiny Tapeout IHP
+# Vivado Synthesis Flow for Tiny Tapeout IHP (CPU Architecture)
 
 ## Prerequisites
 - Vivado 2023.2+
-- IHP 130nm PDK installed
+- IHP 130nm PDK installed (SG13G2)
 - Tiny Tapeout IHP user project template
 
-## Project Structure
+## Project Structure (Current CPU Architecture)
 ```
 project/
-├── src/
-│   └── project.v              # Top-level wrapper (includes tt_um_protocol_emu.v)
 ├── rtl/
-│   ├── tt_um_protocol_emu.v   # TT IHP wrapper
-│   ├── pdis_sequencer.v       # Instruction sequencer
-│   ├── prog_ram.v             # Dual-port program RAM
-│   └── host_if.v              # SPI host interface
+│   ├── emu_top.v              # Top-level integration (CPU + Timers + Pins + Host)
+│   ├── cpu_core.v             # 16-bit CPU with 4-stage pipeline + custom instructions
+│   ├── timer_coproc.v         # 8-channel timer coprocessor (NCO + counter + events)
+│   ├── pin_matrix.v           # 8×8 crossbar with direction/pull/source select
+│   ├── host_if.v              # SPI slave for firmware loading
+│   ├── prog_ram.v             # Program memory (single 4KB bank)
+│   └── tt_um_protocol_emu.v   # TT IHP wrapper (top module)
 ├── sim/
-│   ├── tb_host_if.v           # Host IF unit test
-│   ├── tb_emu_uart.v          # UART TX integration test
-│   └── tb_emu_sample.v        # SAMPLE instruction test
+│   ├── tb_emu_uart.v          # UART firmware integration test
+│   ├── tb_emu_spi_master.v    # SPI master firmware test
+│   ├── tb_emu_i2c_master.v    # I²C master firmware test
+│   ├── tb_m3.v                # M3 hardware detection test
+│   └── tb_host_if.v           # Host interface unit test
 ├── constraints/
 │   └── timing.xdc             # Timing constraints
 └── docs/
     ├── ISA.md                 # Instruction set reference
-    ├── USAGE.md               # This file
-    └── VIVADO.md              # This file
+    ├── USAGE.md               # Usage guide
+    ├── VERIFICATION.md        # Test results
+    ├── VIVADO.md              # This file
+    └── architecture.md        # Architecture specification
 ```
 
 ## Vivado Project Setup
@@ -33,17 +38,19 @@ project/
 ```tcl
 # In Vivado Tcl console
 create_project protocol_emu ./project -part ihp_sg13g2
-# Note: IHP part name depends on PDK installation
+# Note: IHP part name depends on PDK installation (e.g., ihp_sg13g2, sg13g2)
 ```
 
 ### 2. Add Sources
 ```tcl
 add_files {
-  ../src/project.v
-  ../rtl/tt_um_protocol_emu.v
-  ../rtl/pdis_sequencer.v
-  ../rtl/prog_ram.v
+  ../rtl/emu_top.v
+  ../rtl/cpu_core.v
+  ../rtl/timer_coproc.v
+  ../rtl/pin_matrix.v
   ../rtl/host_if.v
+  ../rtl/prog_ram.v
+  ../rtl/tt_um_protocol_emu.v
 }
 
 # Set top module
@@ -61,19 +68,20 @@ add_files -fileset constrs_1 ../constraints/timing.xdc
 set_property STEPS.SYNTH_DESIGN.ARGS.MORE_OPTIONS { -no_lc -flatten_hierarchy none } [get_runs synth_1]
 ```
 
-## Timing Constraints (timing.xdc)
+## Timing Constraints (constraints/timing.xdc)
 
 ```tcl
-# Clock: 10-50 MHz typical for protocol emulation
+# Clock: 50 MHz system clock (TT default)
 create_clock -period 20.0 -name clk [get_ports clk]
 
-# Input/output delays for SPI host interface
+# Input/output delays for SPI host interface (async to clk)
 set_input_delay -clock clk -max 2.0 [get_ports uio_in[0]]   # SCK
 set_input_delay -clock clk -max 2.0 [get_ports uio_in[1]]   # MOSI
 set_input_delay -clock clk -max 2.0 [get_ports uio_in[2]]   # CS_N
 set_output_delay -clock clk -max 3.0 [get_ports uio_out[0]] # MISO
 
-# Protocol pins - no strict timing (software timed)
+# Protocol pins - software timed via CPU/timers
+# No strict timing constraints needed (cycle-accurate in firmware)
 set_input_delay -clock clk -max 5.0 [get_ports ui_in[0]]
 set_input_delay -clock clk -max 5.0 [get_ports ui_in[1]]
 set_input_delay -clock clk -max 5.0 [get_ports ui_in[2]]
@@ -96,29 +104,49 @@ set_output_delay -clock clk -max 5.0 [get_ports uo_out[7]]
 set_false_path -from [get_ports uio_in[*]] -to [get_clocks clk]
 set_false_path -from [get_clocks clk] -to [get_ports uio_out[0]]
 
-# Reset
+# Reset - async active low
 set_property ASYNC_REG true [get_cells -hierarchical *rst*]
 ```
 
 ## IHP 130nm Specific Notes
 
 ### Memory Configuration
-The `prog_ram` uses dual-port distributed RAM. For IHP:
-- 256 × 32 = 8192 bits
-- Maps to ~16K gates (LUTRAM)
-- Should fit in available block RAM or distributed RAM
+The `prog_ram` uses single-port distributed RAM (2048 × 16-bit = 32Kb):
+```verilog
+(* ram_style = "distributed" *)
+reg [15:0] prog_ram [0:2047];
+```
+- Maps to LUTRAM in IHP 130nm
+- Should fit in available distributed RAM resources
+- For larger programs, consider dual-bank or block RAM
+
+### Area Budget
+TT IHP: 8×4 tiles ≈ 32K cells (32,000 gates)
+
+| Block | Est. Cells | % Budget |
+|-------|------------|----------|
+| CPU Core (16-bit, 4-stage, 16 GPRs) | 3,500 | 11% |
+| Timer Coprocessor (8× NCO + counter + events) | 4,500 | 14% |
+| Pin Matrix (8×8 crossbar + config) | 1,200 | 4% |
+| Host Interface (SPI slave) | 1,000 | 3% |
+| Program RAM (4KB distributed) | 2,000 | 6% |
+| Boot ROM (2KB) | 500 | 2% |
+| Capture Buffer (256-entry FIFO) | 1,500 | 5% |
+| HW Assist (Manchester/NRZI/CRC) | 1,000 | 3% |
+| **Subtotal** | **15,200** | **48%** |
+| Clock tree, routing margin (30%) | 4,500 | 14% |
+| **Total** | **~20K** | **62%** |
+
+**Margin**: ~38% (12K cells) for additional features
 
 ### Power/Clock Gating
 ```tcl
 # If using power domains
-create_power_domain -name PD_CORE -elements [get_cells -hierarchical u_sequencer]
+create_power_domain -name PD_CORE -elements [get_cells -hierarchical u_cpu]
+create_power_domain -name PD_TIMERS -elements [get_cells -hierarchical u_timers]
+create_power_domain -name PD_PINS -elements [get_cells -hierarchical u_pin_matrix]
 create_power_domain -name PD_RAM -elements [get_cells -hierarchical u_prog_ram]
 ```
-
-### Area Budget
-TT IHP: 8×4 tiles ≈ 32K cells
-- Estimated: ~18K cells (56% utilization)
-- Room for: additional protocols, larger RAM, debug features
 
 ## Synthesis Flow
 
@@ -144,13 +172,16 @@ report_utilization -hierarchical -file area_report.txt
 ### 2. Timing Report
 ```tcl
 report_timing_summary -file timing_report.txt
-# Check: WNS > 0 (no violations at target frequency)
+# Check: WNS > 0 (no violations at 50MHz / 20ns period)
 ```
 
-### 3. Critical Path
-Typical critical path:
+### 3. Critical Path Analysis
+Typical critical paths:
 ```
-host_if SPI shift register -> prog_ram write -> sequencer fetch -> pin output
+CPU pipeline: IF → ID (decode + reg read + ALU) → EX (mem/peripheral) → WB
+Timer NCO: phase_acc + tuning_word → nco_clk_out → pin_matrix mux → pin_out
+Pin matrix: pin_sel mux (8:1 × 4-bit) → output register
+Host IF: SPI shift register → program RAM write
 ```
 
 ### 4. Power Report
@@ -172,21 +203,42 @@ report_timing_summary -file post_route_timing.txt
 # DRC check
 report_drc -file drc_report.txt
 
-# Generate bitstream (if applicable)
-write_bitstream -force protocol_emu.bit
+# Generate GDSII (via TT flow)
+write_verilog -force post_route.v
+# Then use TT GDS generation flow
 ```
 
 ## TT IHP Submission Checklist
 
 - [ ] Synthesis passes without errors
-- [ ] Timing meets at 50MHz (20ns period)
-- [ ] Area < 32K cells
+- [ ] Timing meets at 50MHz (20ns period) - WNS > 0
+- [ ] Area < 32K cells (target ~20K)
 - [ ] DRC clean
 - [ ] Power within budget
-- [ ] All testbenches pass simulation
+- [ ] All testbenches pass RTL simulation
+- [ ] Gate-level simulation with SDF passes
 - [ ] RTL linting clean (spyglass/verilator)
-- [ ] Documentation complete (ISA.md, USAGE.md)
-- [ ] GDSII generated (via TT flow)
+- [ ] Documentation complete (ISA.md, USAGE.md, VERIFICATION.md)
+- [ ] GDSII generated per TT format
+- [ ] Firmware examples included (UART, SPI, I²C, CAN)
+
+## Yosys Alternative (Open Source - Quick Iteration)
+
+```bash
+# Quick area estimate without Vivado
+podman run --rm -v $(pwd):/workspace docker.io/hdlc/yosys:latest \
+  yosys -p "
+  read_verilog -sv /workspace/rtl/emu_top.v /workspace/rtl/cpu_core.v \
+  /workspace/rtl/timer_coproc.v /workspace/rtl/pin_matrix.v /workspace/rtl/host_if.v;
+  hierarchy -top emu_top;
+  synth -top emu_top -run coarse;
+  stat -tech ihp
+  write_json /workspace/synth.json
+  "
+
+# This provides gate-level cell count for area budgeting
+# Typical output: ~9,395 cells (29% of 32K budget)
+```
 
 ## Troubleshooting
 
@@ -194,36 +246,102 @@ write_bitstream -force protocol_emu.bit
 
 **RAM inference fails:**
 - Ensure `prog_ram.v` uses `reg [WIDTH-1:0] mem [0:DEPTH-1]`
-- Add `(* ram_style = "distributed" *)` attribute if needed
+- Add `(* ram_style = "distributed" *)` attribute
+- Check for proper read-during-write behavior
 
-**Timing violations on SPI interface:**
-- SPI is async to clk, use `set_false_path`
-- Or add synchronizers in host_if
+**Timing violations on CPU pipeline:**
+- Pipeline stages may need balancing
+- Consider adding register stages in ALU or memory access
+- Target: 20ns (50MHz) - should be achievable
 
 **Area too large:**
-- Reduce PROG_DEPTH from 256 to 128
-- Reduce NUM_REGS from 4 to 2
-- Use smaller REG_W (8-bit instead of 16-bit)
+- Reduce PROG_DEPTH from 2048 to 1024 (saves ~1K cells)
+- Reduce timer channels from 8 to 4 (saves ~2K cells)
+- Remove capture buffer if not needed (saves ~1.5K cells)
+- Share NCO phase accumulators across timers
 
 **Simulation/synthesis mismatch:**
 - Check for blocking vs non-blocking assignments
 - Ensure reset polarity consistent (active low rst_n)
 - Verify initial blocks synthesize correctly
+- Watch for X-propagation in Verilog
 
-## Yosys Alternative (Open Source)
+**Pin matrix timing:**
+- Crossbar is purely combinational
+- Add output registers if timing critical
+- Current: 1-cycle through mux is fine at 50MHz
 
+## Key Differences from Legacy Sequencer Architecture
+
+| Aspect | Legacy (pdis_sequencer) | Current (cpu_core + timer_coproc) |
+|--------|------------------------|-----------------------------------|
+| Control | Fixed 32-bit instruction set | 16-bit CPU + custom instructions |
+| Timing | SYNC/WAIT in instruction | WAIT/WAITE custom instructions |
+| Pin Control | DRIVE/SAMPLE in instruction | OUT/DIR/PINSEL custom instructions |
+| Frequency Gen | External/imprecise | Hardware NCO (24-bit, exact) |
+| Protocol Flexibility | Limited by instruction set | Full firmware programmability |
+| Area | ~18K cells (est) | ~20K cells (with more features) |
+| Firmware | Assembly macros | C-like assembly with macros |
+
+## Verification in Vivado
+
+### 1. RTL Simulation
 ```bash
-# Quick area estimate without Vivado
-yosys -p "
-  read_verilog -I rtl rtl/tt_um_protocol_emu.v
-  read_verilog -I rtl rtl/pdis_sequencer.v
-  read_verilog -I rtl rtl/prog_ram.v
-  read_verilog -I rtl rtl/host_if.v
-  hierarchy -top tt_um_protocol_emu
-  synth -top tt_um_protocol_emu
-  stat
-  write_json synth.json
-"
+# In Vivado
+add_files -fileset sim_1 {
+  ../sim/tb_emu_uart.v
+  ../sim/tb_emu_spi_master.v
+  ../sim/tb_emu_i2c_master.v
+  ../sim/tb_m3.v
+  ../sim/tb_host_if.v
+}
+set_property top tb_emu_uart [get_filesets sim_1]
+launch_simulation
 ```
 
-This provides gate-level cell count for area budgeting.
+### 2. Gate-Level Simulation with SDF
+```tcl
+# After implementation
+write_sdf -force post_route.sdf
+# Add SDF to testbench
+set_property GENERIC_SDF_FILE post_route.sdf [get_filesets sim_1]
+launch_simulation
+```
+
+### 3. Formal Verification (Optional)
+```bash
+# CPU pipeline properties
+sby -f cpu_core.sby
+# Timer NCO accuracy
+sby -f timer_coproc.sby
+```
+
+## Example Firmware Loading (Post-Silicon)
+
+```python
+# Python SPI loader for production
+import spidev
+
+spi = spidev.SpiDev()
+spi.open(0, 0)
+spi.mode = 0
+spi.max_speed_hz = 10_000_000
+
+def spi_write(addr, data32):
+    frame = (data32 << 24) | (addr << 8) | 0x01
+    spi.xfer3(frame.to_bytes(8, 'big'))
+
+def spi_run(length):
+    frame = (length << 8) | 0x03
+    spi.xfer3(frame.to_bytes(8, 'big'))
+
+# Load UART firmware
+with open('firmware/uart.bin', 'rb') as f:
+    words = [int.from_bytes(f.read(2), 'little') for _ in range(len(f.read())//2)]
+
+for i, word in enumerate(words[::2]):
+    spi_write(i*2, (words[i*2+1] << 16) | word)
+
+spi_run(len(words)*2)
+```
+

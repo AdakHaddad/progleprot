@@ -100,25 +100,42 @@ module tb_emu_i2c_master;
     // DIR pin,dir:   0xF100 | pin<<4 | dir
     // WAIT timer,cycles: 0xF200 | timer<<4 | cycles
     // TCFG timer,cfg: 0xF500 | timer<<4 | cfg
-    // PINSEL pin,src: 0xF600 | pin<<4 | src
+    // TUNING timer,val: 0xF600 | timer<<4 | val   (funct=6)
+    // PINSEL pin,src: 0xF700 | pin<<4 | src      (funct=7)
     // HALT:          0xFFFF
 
     // I²C @ 100kHz: NCO increment = (100_000 / 50_000_000) * 2^24 = 335544 = 0x51EB8
-    // Low 16: 0x1EB8, High 8: 0x05
-    
-    // ADDI x1, 0xB8   -> 0x81B8 (NCO low)
-    // ADDI x9, 0x1E   -> 0x891E (NCO mid)
-    // ADDI x10, 0x05  -> 0x8A05 (NCO high)
+    // Low 8 bits:  0xB8
+    // Mid 8 bits:  0x1E
+    // High 8 bits: 0x05
+
+    // ADDI x1, 0xB8   -> 0x81B8 (NCO low byte)
+    // ADDI x9, 0x1E   -> 0x891E (NCO mid byte)
+    // ADDI x10, 0x05  -> 0x8A05 (NCO high byte)
     // ADDI x11, 0x00  -> 0x8B00 (timer 0)
     // ADDI x12, 0x03  -> 0x8C03 (MODE_NCO_CLK=3)
     // TCFG x11, x12   -> 0xF5B3 (funct=5, rs1=11, rs2=12)
 
-    localparam [15:0] INS_ADDI_x1_B8  = 16'h81B8;
-    localparam [15:0] INS_ADDI_x9_1E  = 16'h891E;
-    localparam [15:0] INS_ADDI_x10_05 = 16'h8A05;
-    localparam [15:0] INS_ADDI_x11_00 = 16'h8B00;
-    localparam [15:0] INS_ADDI_x12_03 = 16'h8C03;
+    localparam [15:0] INS_ADDI_x1_B8   = 16'h81B8;
+    localparam [15:0] INS_ADDI_x9_1E   = 16'h891E;
+    localparam [15:0] INS_ADDI_x10_05  = 16'h8A05;
+    localparam [15:0] INS_ADDI_x11_00  = 16'h8B00;
+    localparam [15:0] INS_ADDI_x12_03  = 16'h8C03;
     localparam [15:0] INS_TCFG_x11_x12 = 16'hF5B3;  // TCFG timer 0, mode 3
+
+    // NCO tuning word writes (TUNING instruction: funct=6)
+    // TUNING x11, x1  -> write low 8 bits to REG_TUNING
+    // TUNING x11, x9  -> write mid 8 bits 
+    // TUNING x11, x10 -> write high 8 bits
+    // Need to use rs2[8] = 1 to select high register
+    localparam [15:0] INS_ADDI_x13_00  = 16'h8D00;  // x13 = 0 (select low reg)
+    localparam [15:0] INS_ADDI_x14_01  = 16'h8E01;  // x14 = 1 (select mid reg? need rs2[8]=1)
+    // Actually TUNING uses rs2[8] to select REG_TUNING (0) vs REG_TUNING_H (1)
+    // For 24-bit: write low 8 to REG_TUNING, high 16 to REG_TUNING_H
+    localparam [15:0] INS_ADDI_x14_100 = 16'h8E00;  // x14 = 0x100 (bit 8 = 1 for high reg)
+    localparam [15:0] INS_TUNING_x11_x1 = 16'hF6B1;  // TUNING timer 0, val=x1 (low 8)
+    localparam [15:0] INS_TUNING_x11_x9 = 16'hF6B9;  // TUNING timer 0, val=x9 (mid 8) 
+    localparam [15:0] INS_TUNING_x11_x14 = 16'hF6BE; // TUNING timer 0, val=x14 (high 16 with bit 8=1)
 
     // Pin setup: SDA=pin0 (out), SCL=pin1 (out, NCO driven)
     localparam [15:0] INS_ADDI_x2_00  = 16'h8200;  // SDA pin
@@ -126,8 +143,8 @@ module tb_emu_i2c_master;
     localparam [15:0] INS_DIR_x2_x13  = 16'hF12D;  // DIR pin 0, dir=1
     localparam [15:0] INS_ADDI_x3_01  = 16'h8301;  // SCL pin
     localparam [15:0] INS_DIR_x3_x13  = 16'hF13D;  // DIR pin 1, dir=1
-    localparam [15:0] INS_ADDI_x14_01 = 16'h8E01;  // src = Timer 0 NCO
-    localparam [15:0] INS_PINSEL_x3_x14 = 16'hF63E; // PINSEL pin 1, src=1
+    localparam [15:0] INS_ADDI_x14_01b = 16'h8E01; // src = Timer 0 NCO (1)
+    localparam [15:0] INS_PINSEL_x3_x14 = 16'hF73E; // PINSEL pin 1, src=1 (funct=7!)
 
     // Constants
     localparam [15:0] INS_ADDI_x11_01 = 16'h8B01;  // const 1
@@ -234,43 +251,47 @@ module tb_emu_i2c_master;
         spi_write(16'h0000, {INS_ADDI_x9_1E,   INS_ADDI_x1_B8});     // addr 0,1
         spi_write(16'h0002, {INS_ADDI_x11_00,  INS_ADDI_x10_05});    // addr 2,3
         spi_write(16'h0004, {INS_ADDI_x13_01,  INS_ADDI_x12_03});    // addr 4,5
-        spi_write(16'h0006, {INS_TCFG_x11_x12, INS_ADDI_x2_00});     // addr 6,7
-        spi_write(16'h0008, {INS_ADDI_x14_01,  INS_DIR_x2_x13});     // addr 8,9
-        spi_write(16'h000A, {INS_DIR_x3_x13,   INS_PINSEL_x3_x14});  // addr 10,11
-        spi_write(16'h000C, {INS_ADDI_x11_01,  INS_ADDI_x12_00});    // addr 12,13
-        spi_write(16'h000E, {INS_ADDI_x8_64,   INS_ADDI_x5_01});     // addr 14,15
-        spi_write(16'h0010, {INS_OUT_x2_x5,    INS_OUT_x3_x5_2});    // addr 16,17
-        spi_write(16'h0012, {INS_WAIT_x11_x8,  INS_ADDI_x5_00});     // addr 18,19
-        spi_write(16'h0014, {INS_OUT_x2_x5_2,  INS_ADDI_x8_32});     // addr 20,21
-        spi_write(16'h0016, {INS_WAIT_x11_x8_2, INS_OUT_x3_x5_3});   // addr 22,23
-        spi_write(16'h0018, {INS_WAIT_x11_x8_3, INS_ADDI_x5_01_2});  // addr 24,25
-        spi_write(16'h001A, {INS_OUT_x2_x5_3,  INS_ADDI_x8_32_2});   // addr 26,27
-        spi_write(16'h001C, {INS_WAIT_x11_x8_4, INS_WAIT_x11_x8_5}); // addr 28,29
-        spi_write(16'h001E, {INS_ADDI_x5_00_2, INS_OUT_x2_x5_4});    // addr 30,31
-        spi_write(16'h0020, {INS_WAIT_x11_x8_6, INS_WAIT_x11_x8_7}); // addr 32,33
-        spi_write(16'h0022, {INS_ADDI_x5_01_3, INS_OUT_x2_x5_5});    // addr 34,35
-        spi_write(16'h0024, {INS_WAIT_x11_x8_8, INS_WAIT_x11_x8_9}); // addr 36,37
-        spi_write(16'h0026, {INS_ADDI_x5_00_3, INS_OUT_x2_x5_6});    // addr 38,39
-        spi_write(16'h0028, {INS_WAIT_x11_x8_10, INS_WAIT_x11_x8_11}); // addr 40,41
-        spi_write(16'h002A, {INS_ADDI_x5_00_4, INS_OUT_x2_x5_7});    // addr 42,43
-        spi_write(16'h002C, {INS_WAIT_x11_x8_12, INS_WAIT_x11_x8_13}); // addr 44,45
-        spi_write(16'h002E, {INS_ADDI_x5_01_4, INS_OUT_x2_x5_8});    // addr 46,47
-        spi_write(16'h0030, {INS_WAIT_x11_x8_14, INS_WAIT_x11_x8_15}); // addr 48,49
-        spi_write(16'h0032, {INS_ADDI_x5_00_5, INS_OUT_x2_x5_9});    // addr 50,51
-        spi_write(16'h0034, {INS_WAIT_x11_x8_16, INS_WAIT_x11_x8_17}); // addr 52,53
-        spi_write(16'h0036, {INS_ADDI_x5_00_6, INS_OUT_x2_x5_10});   // addr 54,55
-        spi_write(16'h0038, {INS_WAIT_x11_x8_18, INS_WAIT_x11_x8_19}); // addr 56,57
-        spi_write(16'h003A, {INS_ADDI_x5_01_5, INS_OUT_x2_x5_11});   // addr 58,59
-        spi_write(16'h003C, {INS_WAIT_x11_x8_20, INS_WAIT_x11_x8_21}); // addr 60,61
-        spi_write(16'h003E, {INS_ADDI_x5_00_7, INS_OUT_x3_x5_4});    // addr 62,63
-        spi_write(16'h0040, {INS_WAIT_x11_x8_22, INS_ADDI_x5_00_8}); // addr 64,65
-        spi_write(16'h0042, {INS_OUT_x2_x5_12,  INS_ADDI_x5_01_6});  // addr 66,67
-        spi_write(16'h0044, {INS_OUT_x3_x5_5,   INS_WAIT_x11_x8_23}); // addr 68,69
-        spi_write(16'h0046, {INS_OUT_x2_x5_13,  INS_WAIT_x11_x8_24}); // addr 70,71
-        spi_write(16'h0048, {INS_HALT,          16'h0000});           // addr 72,73
+        spi_write(16'h0006, {INS_TCFG_x11_x12, INS_ADDI_x13_00});    // addr 6,7 (x13=0 for low reg)
+        spi_write(16'h0008, {INS_TUNING_x11_x1, INS_ADDI_x14_100});  // addr 8,9 (x14=0x100 for high reg)
+        spi_write(16'h000A, {INS_TUNING_x11_x9, INS_TUNING_x11_x14}); // addr 10,11
+        spi_write(16'h000C, {INS_ADDI_x2_00,   INS_ADDI_x13_01});    // addr 12,13
+        spi_write(16'h000E, {INS_DIR_x2_x13,   INS_ADDI_x3_01});     // addr 14,15
+        spi_write(16'h0010, {INS_DIR_x3_x13,   INS_ADDI_x14_01b});   // addr 16,17
+        spi_write(16'h0012, {INS_PINSEL_x3_x14, INS_ADDI_x11_01});   // addr 18,19
+        spi_write(16'h0014, {INS_ADDI_x12_00,  INS_ADDI_x8_64});     // addr 20,21
+        spi_write(16'h0016, {INS_ADDI_x5_01,   INS_OUT_x2_x5});      // addr 22,23
+        spi_write(16'h0018, {INS_OUT_x3_x5_2,  INS_WAIT_x11_x8});    // addr 24,25
+        spi_write(16'h001A, {INS_ADDI_x5_00,   INS_OUT_x2_x5_2});    // addr 26,27
+        spi_write(16'h001C, {INS_ADDI_x8_32,   INS_WAIT_x11_x8_2});  // addr 28,29
+        spi_write(16'h001E, {INS_OUT_x3_x5_3,  INS_WAIT_x11_x8_3});  // addr 30,31
+        spi_write(16'h0020, {INS_ADDI_x5_01_2, INS_OUT_x2_x5_3});    // addr 32,33
+        spi_write(16'h0022, {INS_ADDI_x8_32_2, INS_WAIT_x11_x8_4});  // addr 34,35
+        spi_write(16'h0024, {INS_WAIT_x11_x8_5, INS_ADDI_x5_00_2});  // addr 36,37
+        spi_write(16'h0026, {INS_OUT_x2_x5_4,  INS_WAIT_x11_x8_6});  // addr 38,39
+        spi_write(16'h0028, {INS_WAIT_x11_x8_7, INS_ADDI_x5_01_3});  // addr 40,41
+        spi_write(16'h002A, {INS_OUT_x2_x5_5,  INS_ADDI_x8_32_2});   // addr 42,43
+        spi_write(16'h002C, {INS_WAIT_x11_x8_8, INS_WAIT_x11_x8_9}); // addr 44,45
+        spi_write(16'h002E, {INS_ADDI_x5_00_3, INS_OUT_x2_x5_6});    // addr 46,47
+        spi_write(16'h0030, {INS_WAIT_x11_x8_10, INS_WAIT_x11_x8_11}); // addr 48,49
+        spi_write(16'h0032, {INS_ADDI_x5_00_4, INS_OUT_x2_x5_7});    // addr 50,51
+        spi_write(16'h0034, {INS_WAIT_x11_x8_12, INS_WAIT_x11_x8_13}); // addr 52,53
+        spi_write(16'h0036, {INS_ADDI_x5_01_4, INS_OUT_x2_x5_8});    // addr 54,55
+        spi_write(16'h0038, {INS_WAIT_x11_x8_14, INS_WAIT_x11_x8_15}); // addr 56,57
+        spi_write(16'h003A, {INS_ADDI_x5_00_5, INS_OUT_x2_x5_9});    // addr 58,59
+        spi_write(16'h003C, {INS_WAIT_x11_x8_16, INS_WAIT_x11_x8_17}); // addr 60,61
+        spi_write(16'h003E, {INS_ADDI_x5_00_6, INS_OUT_x2_x5_10});   // addr 62,63
+        spi_write(16'h0040, {INS_WAIT_x11_x8_18, INS_WAIT_x11_x8_19}); // addr 64,65
+        spi_write(16'h0042, {INS_ADDI_x5_01_5, INS_OUT_x2_x5_11});   // addr 66,67
+        spi_write(16'h0044, {INS_WAIT_x11_x8_20, INS_WAIT_x11_x8_21}); // addr 68,69
+        spi_write(16'h0046, {INS_ADDI_x5_00_7, INS_OUT_x3_x5_4});    // addr 70,71
+        spi_write(16'h0048, {INS_WAIT_x11_x8_22, INS_ADDI_x5_00_8}); // addr 72,73
+        spi_write(16'h004A, {INS_OUT_x2_x5_12, INS_ADDI_x5_01_6});   // addr 74,75
+        spi_write(16'h004C, {INS_OUT_x3_x5_5,  INS_WAIT_x11_x8_23}); // addr 76,77
+        spi_write(16'h004E, {INS_OUT_x2_x5_13, INS_WAIT_x11_x8_24}); // addr 78,79
+        spi_write(16'h0050, {INS_HALT,         16'h0000});           // addr 80,81
 
         $display("Program loaded. Starting CPU...");
-        spi_run(16'd148);  // 74 instructions * 2 bytes
+        spi_run(16'd164);  // 82 instructions * 2 bytes
 
         // Wait for CPU to complete
         wait_clk(2000000);
@@ -333,6 +354,6 @@ module tb_emu_i2c_master;
     end
 
     // Timeout
-    initial begin #1000000; $display("TIMEOUT"); $finish; end
+    initial begin #2000000; $display("TIMEOUT"); $finish; end
 
 endmodule

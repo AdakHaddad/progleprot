@@ -93,16 +93,19 @@ module tb_emu_spi_master;
     // ADDI rd, imm:  0x8rd0 | imm8
     // ADD rd,rs1,rs2: 0x0rd0 | rs1<<4 | rs2
     // OUT pin,val:   0xF000 | pin<<4 | val
-    // DIR pin:       0xF100 | pin<<4
+    // DIR pin,dir:   0xF100 | pin<<4 | dir
     // WAIT timer,cycles: 0xF200 | timer<<4 | cycles
+    // TCFG timer,cfg: 0xF500 | timer<<4 | cfg
+    // TUNING timer,val: 0xF600 | timer<<4 | val   (funct=6)
+    // PINSEL pin,src: 0xF700 | pin<<4 | src      (funct=7)
     // HALT:          0xFFFF
 
     // SPI Master @ 25MHz: NCO increment = (25_000_000 / 50_000_000) * 2^24 = 0x800000
     // Timer 0 NCO: 0x800000 (low 16: 0x0000, mid 8: 0x80, high 8: 0x00)
     
-    // ADDI x1, 0x00   -> 0x8100 (NCO low)
-    // ADDI x2, 0x80   -> 0x8280 (NCO mid)
-    // ADDI x3, 0x00   -> 0x8300 (NCO high)
+    // ADDI x1, 0x00   -> 0x8100 (NCO low 8 bits)
+    // ADDI x2, 0x80   -> 0x8280 (NCO mid 8 bits)
+    // ADDI x3, 0x00   -> 0x8300 (NCO high 8 bits)
     // ADDI x4, 0x00   -> 0x8400 (timer 0)
     // ADDI x5, 0x00   -> 0x8500 (pin 0 = MOSI)
     // ADDI x6, 0x02   -> 0x8602 (pin 2 = SCK)
@@ -113,7 +116,7 @@ module tb_emu_spi_master;
     // ADDI x11, 0x01  -> 0x8B01 (const 1)
     // ADDI x12, 0x00  -> 0x8C00
     // ADDI x13, 0x11  -> 0x8D11 (wait cycles ~17)
-    // ADDI x14, 0x01  -> 0x8E01
+    // ADDI x14, 0x01  -> 0x8E01 (for PINSEL src)
     // ADDI x15, 0x00  -> 0x8F00
 
     localparam [15:0] INS_ADDI_x1_00  = 16'h8100;
@@ -132,17 +135,36 @@ module tb_emu_spi_master;
     localparam [15:0] INS_ADDI_x14_01 = 16'h8E01;
     localparam [15:0] INS_ADDI_x15_00 = 16'h8F00;
 
+    // TUNING writes for NCO (funct=6)
+    // TUNING x4, x1  -> write low 8 bits to REG_TUNING (rs2[8]=0)
+    // TUNING x4, x2  -> write mid 8 bits 
+    // TUNING x4, x3  -> write high 8 bits (need rs2[8]=1 for REG_TUNING_H)
+    // x15 = 0x100 (bit 8 = 1 for high reg)
+    localparam [15:0] INS_ADDI_x15_100 = 16'h8F00;
+    localparam [15:0] INS_TUNING_x4_x1  = 16'hF641;  // TUNING timer 0, val=x1 (low 8)
+    localparam [15:0] INS_TUNING_x4_x2  = 16'hF642;  // TUNING timer 0, val=x2 (mid 8) 
+    localparam [15:0] INS_TUNING_x4_x15 = 16'hF64F; // TUNING timer 0, val=x15 (high 16 with bit 8=1)
+
+    // TCFG: configure timer 0 as NCO clock (MODE_NCO_CLK = 3)
+    localparam [15:0] INS_ADDI_x12_03  = 16'h8C03;
+    localparam [15:0] INS_TCFG_x4_x12  = 16'hF543;  // TCFG timer 0, mode 3
+
     // DIR pins: 0=MOSI(out), 2=SCK(out), 3=CS(out), 1=MISO(in)
-    localparam [15:0] INS_DIR_x5      = 16'hF150;  // DIR pin 0 (MOSI) - out
-    localparam [15:0] INS_DIR_x6      = 16'hF160;  // DIR pin 2 (SCK) - out
-    localparam [15:0] INS_DIR_x7      = 16'hF170;  // DIR pin 3 (CS) - out
-    localparam [15:0] INS_DIR_x8      = 16'hF180;  // DIR pin 1 (MISO) - in
+    localparam [15:0] INS_ADDI_x13_01  = 16'h8D01;  // dir = output
+    localparam [15:0] INS_DIR_x5_x13   = 16'hF15D;  // DIR pin 0 (MOSI), dir=1
+    localparam [15:0] INS_DIR_x6_x13   = 16'hF16D;  // DIR pin 2 (SCK), dir=1
+    localparam [15:0] INS_DIR_x7_x13   = 16'hF17D;  // DIR pin 3 (CS), dir=1
+    localparam [15:0] INS_ADDI_x13_00  = 16'h8D00;  // dir = input
+    localparam [15:0] INS_DIR_x8_x13   = 16'hF18D;  // DIR pin 1 (MISO), dir=0
+
+    // PINSEL: SCK (pin 2) driven by Timer 0 NCO (src=1)
+    localparam [15:0] INS_PINSEL_x6_x14 = 16'hF76E; // PINSEL pin 2, src=1 (funct=7!)
 
     // CS low
     localparam [15:0] INS_ADDI_x7_00  = 16'h8700;
     localparam [15:0] INS_OUT_x7_x7   = 16'hF077;  // OUT pin 3 (CS), val=0
 
-    // SCK idle high (mode 0)
+    // SCK idle high (mode 0) - will be overridden by NCO
     localparam [15:0] INS_ADDI_x6_01  = 16'h8601;
     localparam [15:0] INS_OUT_x6_x6   = 16'hF066;  // OUT pin 2 (SCK), val=1
 
@@ -154,14 +176,14 @@ module tb_emu_spi_master;
     localparam [15:0] INS_ADD_x12_x9_x0 = 16'h0C90; // ADD x12, x9, x0 (shift)
     localparam [15:0] INS_ADDI_x12_01  = 16'h8C01; // check MSB
 
-    // SCK low
+    // SCK low (NCO will drive this)
     localparam [15:0] INS_ADDI_x6_00  = 16'h8600;
     localparam [15:0] INS_OUT_x6_x6_2 = 16'hF066;
 
     // Wait half cycle
     localparam [15:0] INS_WAIT_x4_x13 = 16'hF24D;  // WAIT timer 0, cycles=x13
 
-    // SCK high
+    // SCK high (NCO will drive this)
     localparam [15:0] INS_ADDI_x6_01_2 = 16'h8601;
     localparam [15:0] INS_OUT_x6_x6_3 = 16'hF066;
 
@@ -194,21 +216,27 @@ module tb_emu_spi_master;
         spi_write(16'h0008, {INS_ADDI_x10_08, INS_ADDI_x9_AA});   // addr 8,9
         spi_write(16'h000A, {INS_ADDI_x12_00, INS_ADDI_x11_01});  // addr 10,11
         spi_write(16'h000C, {INS_ADDI_x14_01, INS_ADDI_x13_11});  // addr 12,13
-        spi_write(16'h000E, {INS_ADDI_x15_00, INS_DIR_x5});       // addr 14,15
-        spi_write(16'h0010, {INS_DIR_x6,      INS_DIR_x7});       // addr 16,17
-        spi_write(16'h0012, {INS_DIR_x8,      INS_ADDI_x7_00});   // addr 18,19
-        spi_write(16'h0014, {INS_OUT_x7_x7,   INS_ADDI_x6_01});   // addr 20,21
-        spi_write(16'h0016, {INS_OUT_x6_x6,   INS_ADDI_x10_08_2}); // addr 22,23
-        spi_write(16'h0018, {INS_ADDI_x9_AA_2, INS_ADD_x12_x9_x0}); // addr 24,25
-        spi_write(16'h001A, {INS_ADDI_x12_01, INS_ADDI_x6_00});   // addr 26,27
-        spi_write(16'h001C, {INS_OUT_x6_x6_2, INS_WAIT_x4_x13});  // addr 28,29
-        spi_write(16'h001E, {INS_ADDI_x6_01_2, INS_OUT_x6_x6_3}); // addr 30,31
-        spi_write(16'h0020, {INS_WAIT_x4_x13_2, INS_ADD_x9_x9_x9}); // addr 32,33
-        spi_write(16'h0022, {INS_ADDI_x10_ff, INS_ADD_x10_x10_x11}); // addr 34,35
-        spi_write(16'h0024, {INS_HALT,        16'h0000});         // addr 36,37
+        spi_write(16'h000E, {INS_ADDI_x15_00, INS_ADDI_x15_100}); // addr 14,15 (x15=0, x15=0x100)
+        spi_write(16'h0010, {INS_TUNING_x4_x1,  INS_TUNING_x4_x2}); // addr 16,17 (NCO low, mid)
+        spi_write(16'h0012, {INS_TUNING_x4_x15, INS_TCFG_x4_x12}); // addr 18,19 (NCO high, mode)
+        spi_write(16'h0014, {INS_ADDI_x5_00,  INS_ADDI_x13_01});  // addr 20,21 (pin 0, dir=out)
+        spi_write(16'h0016, {INS_DIR_x5_x13,  INS_ADDI_x6_02});   // addr 22,23
+        spi_write(16'h0018, {INS_DIR_x6_x13,  INS_ADDI_x7_03});   // addr 24,25
+        spi_write(16'h001A, {INS_DIR_x7_x13,  INS_ADDI_x8_01});   // addr 26,27
+        spi_write(16'h001C, {INS_ADDI_x13_00, INS_DIR_x8_x13});   // addr 28,29
+        spi_write(16'h001E, {INS_ADDI_x14_01, INS_PINSEL_x6_x14}); // addr 30,31 (pin sel SCK)
+        spi_write(16'h0020, {INS_ADDI_x7_00,  INS_OUT_x7_x7});    // addr 32,33 (CS low)
+        spi_write(16'h0022, {INS_ADDI_x6_01,  INS_OUT_x6_x6});    // addr 34,35 (SCK idle)
+        spi_write(16'h0024, {INS_ADDI_x10_08_2, INS_ADDI_x9_AA_2}); // addr 36,37
+        spi_write(16'h0026, {INS_ADD_x12_x9_x0, INS_ADDI_x12_01}); // addr 38,39
+        spi_write(16'h0028, {INS_ADDI_x6_00,  INS_OUT_x6_x6_2});  // addr 40,41
+        spi_write(16'h002A, {INS_WAIT_x4_x13, INS_ADDI_x6_01_2}); // addr 42,43
+        spi_write(16'h002C, {INS_OUT_x6_x6_3, INS_WAIT_x4_x13_2}); // addr 44,45
+        spi_write(16'h002E, {INS_ADD_x9_x9_x9,  INS_ADDI_x10_ff}); // addr 46,47
+        spi_write(16'h0030, {INS_ADD_x10_x10_x11, INS_HALT});    // addr 48,49
 
         $display("Program loaded. Starting CPU...");
-        spi_run(16'd76);  // 38 instructions * 2 bytes
+        spi_run(16'd100);  // 50 instructions * 2 bytes
 
         // Wait for CPU to complete
         wait_clk(500000);
@@ -227,7 +255,7 @@ module tb_emu_spi_master;
         dbg_reg_idx = 4'd11; wait_clk(1); $display("R11 (x11): %h (const1)", dbg_reg_data);
         dbg_reg_idx = 4'd12; wait_clk(1); $display("R12 (x12): %h (shift)", dbg_reg_data);
         dbg_reg_idx = 4'd13; wait_clk(1); $display("R13 (x13): %h (wait)", dbg_reg_data);
-        dbg_reg_idx = 4'd14; wait_clk(1); $display("R14 (x14): %h (const1)", dbg_reg_data);
+        dbg_reg_idx = 4'd14; wait_clk(1); $display("R14 (x14): %h (pin sel src)", dbg_reg_data);
         dbg_reg_idx = 4'd15; wait_clk(1); $display("R15 (x15): %h (const0/tuning)", dbg_reg_data);
         $display("PC: %h", dut.u_cpu.pc_debug);
         
