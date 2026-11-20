@@ -13,6 +13,10 @@ module tb_emu_spi_master;
     wire [7:0] uio_out;
     wire [7:0] uio_oe;
 
+    // Debug register interface
+    reg [3:0] dbg_reg_idx = 4'd0;
+    wire [15:0] dbg_reg_data;
+
     emu_top #(
         .NUM_PINS(8),
         .PROG_DEPTH(2048),
@@ -29,7 +33,9 @@ module tb_emu_spi_master;
         .spi_miso(uio_out[0]),
         .spi_cs_n(uio_in[2]),
         .cpu_running(uio_out[1]),
-        .cpu_error(uio_out[2])
+        .cpu_error(uio_out[2]),
+        .dbg_reg_idx(dbg_reg_idx),
+        .dbg_reg_data(dbg_reg_data)
     );
 
     always #10 clk = ~clk;
@@ -52,15 +58,15 @@ module tb_emu_spi_master;
         integer b;
         reg [63:0] cmd;
         begin
-            cmd = make_spi_cmd(data, addr, 8'h01);
-            uio_in[2] = 0;
+            cmd = make_spi_cmd(data, addr, 8'h01);  // CMD_WRITE = 0x01
+            uio_in[2] = 0;  // CS_N low
             wait_clk(2);
             for (b = 63; b >= 0; b = b - 1) begin
-                uio_in[1] = cmd[b];
-                uio_in[0] = 0; wait_clk(2);
-                uio_in[0] = 1; wait_clk(2);
+                uio_in[1] = cmd[b];  // MOSI
+                uio_in[0] = 0; wait_clk(2);  // SCK low
+                uio_in[0] = 1; wait_clk(2);  // SCK high
             end
-            uio_in[2] = 1;
+            uio_in[2] = 1;  // CS_N high
             wait_clk(4);
         end
     endtask
@@ -69,7 +75,7 @@ module tb_emu_spi_master;
         integer b;
         reg [63:0] cmd;
         begin
-            cmd = make_spi_cmd(32'h0, length, 8'h03);
+            cmd = make_spi_cmd(32'h0, length, 8'h03);  // CMD_RUN = 0x03
             uio_in[2] = 0;
             wait_clk(2);
             for (b = 63; b >= 0; b = b - 1) begin
@@ -82,172 +88,147 @@ module tb_emu_spi_master;
         end
     endtask
 
-    // Instruction encoding
-    function [15:0] INS_ADDI(input [3:0] rd, input [7:0] imm);
-        begin INS_ADDI = (4'h8 << 12) | (rd << 8) | imm; end
-    endfunction
+    // SPI Master firmware instructions (pre-computed 16-bit)
+    // ISA encoding:
+    // ADDI rd, imm:  0x8rd0 | imm8
+    // ADD rd,rs1,rs2: 0x0rd0 | rs1<<4 | rs2
+    // OUT pin,val:   0xF000 | pin<<4 | val
+    // DIR pin:       0xF100 | pin<<4
+    // WAIT timer,cycles: 0xF200 | timer<<4 | cycles
+    // HALT:          0xFFFF
 
-    function [15:0] INS_ORI(input [3:0] rd, input [7:0] imm);
-        begin INS_ORI = (4'h9 << 12) | (rd << 8) | imm; end
-    endfunction
+    // SPI Master @ 25MHz: NCO increment = (25_000_000 / 50_000_000) * 2^24 = 0x800000
+    // Timer 0 NCO: 0x800000 (low 16: 0x0000, mid 8: 0x80, high 8: 0x00)
+    
+    // ADDI x1, 0x00   -> 0x8100 (NCO low)
+    // ADDI x2, 0x80   -> 0x8280 (NCO mid)
+    // ADDI x3, 0x00   -> 0x8300 (NCO high)
+    // ADDI x4, 0x00   -> 0x8400 (timer 0)
+    // ADDI x5, 0x00   -> 0x8500 (pin 0 = MOSI)
+    // ADDI x6, 0x02   -> 0x8602 (pin 2 = SCK)
+    // ADDI x7, 0x03   -> 0x8703 (pin 3 = CS)
+    // ADDI x8, 0x01   -> 0x8801 (pin 1 = MISO - input)
+    // ADDI x9, 0xAA   -> 0x89AA (TX data = 0xAA)
+    // ADDI x10, 0x08  -> 0x8A08 (bit count = 8)
+    // ADDI x11, 0x01  -> 0x8B01 (const 1)
+    // ADDI x12, 0x00  -> 0x8C00
+    // ADDI x13, 0x11  -> 0x8D11 (wait cycles ~17)
+    // ADDI x14, 0x01  -> 0x8E01
+    // ADDI x15, 0x00  -> 0x8F00
 
-    // Custom instruction funct codes
-    localparam FUNCT_OUT    = 4'h0;
-    localparam FUNCT_DIR    = 4'h1;
-    localparam FUNCT_WAIT   = 4'h2;
-    localparam FUNCT_TCFG   = 4'h5;
-    localparam FUNCT_TUNING = 4'h6;
-    localparam FUNCT_PINSEL = 4'h7;
-    localparam FUNCT_HALT   = 4'hF;
+    localparam [15:0] INS_ADDI_x1_00  = 16'h8100;
+    localparam [15:0] INS_ADDI_x2_80  = 16'h8280;
+    localparam [15:0] INS_ADDI_x3_00  = 16'h8300;
+    localparam [15:0] INS_ADDI_x4_00  = 16'h8400;
+    localparam [15:0] INS_ADDI_x5_00  = 16'h8500;
+    localparam [15:0] INS_ADDI_x6_02  = 16'h8602;
+    localparam [15:0] INS_ADDI_x7_03  = 16'h8703;
+    localparam [15:0] INS_ADDI_x8_01  = 16'h8801;
+    localparam [15:0] INS_ADDI_x9_AA  = 16'h89AA;
+    localparam [15:0] INS_ADDI_x10_08 = 16'h8A08;
+    localparam [15:0] INS_ADDI_x11_01 = 16'h8B01;
+    localparam [15:0] INS_ADDI_x12_00 = 16'h8C00;
+    localparam [15:0] INS_ADDI_x13_11 = 16'h8D11;
+    localparam [15:0] INS_ADDI_x14_01 = 16'h8E01;
+    localparam [15:0] INS_ADDI_x15_00 = 16'h8F00;
 
-    function [15:0] INS_OUT(input [3:0] pin_reg, input [3:0] val_reg);
-        begin INS_OUT = (4'hF << 12) | (FUNCT_OUT << 8) | (pin_reg << 4) | val_reg; end
-    endfunction
+    // DIR pins: 0=MOSI(out), 2=SCK(out), 3=CS(out), 1=MISO(in)
+    localparam [15:0] INS_DIR_x5      = 16'hF150;  // DIR pin 0 (MOSI) - out
+    localparam [15:0] INS_DIR_x6      = 16'hF160;  // DIR pin 2 (SCK) - out
+    localparam [15:0] INS_DIR_x7      = 16'hF170;  // DIR pin 3 (CS) - out
+    localparam [15:0] INS_DIR_x8      = 16'hF180;  // DIR pin 1 (MISO) - in
 
-    function [15:0] INS_DIR(input [3:0] pin_reg, input [3:0] dir_reg);
-        begin INS_DIR = (4'hF << 12) | (FUNCT_DIR << 8) | (pin_reg << 4) | dir_reg; end
-    endfunction
+    // CS low
+    localparam [15:0] INS_ADDI_x7_00  = 16'h8700;
+    localparam [15:0] INS_OUT_x7_x7   = 16'hF077;  // OUT pin 3 (CS), val=0
 
-    function [15:0] INS_WAIT(input [3:0] timer_reg, input [3:0] cycles_reg);
-        begin INS_WAIT = (4'hF << 12) | (FUNCT_WAIT << 8) | (timer_reg << 4) | cycles_reg; end
-    endfunction
+    // SCK idle high (mode 0)
+    localparam [15:0] INS_ADDI_x6_01  = 16'h8601;
+    localparam [15:0] INS_OUT_x6_x6   = 16'hF066;  // OUT pin 2 (SCK), val=1
 
-    function [15:0] INS_TCFG(input [3:0] timer_reg, input [3:0] config_reg);
-        begin INS_TCFG = (4'hF << 12) | (FUNCT_TCFG << 8) | (timer_reg << 4) | config_reg; end
-    endfunction
+    // TX loop start
+    localparam [15:0] INS_ADDI_x10_08_2 = 16'h8A08; // reset bit count
+    localparam [15:0] INS_ADDI_x9_AA_2  = 16'h89AA; // reload data
 
-    function [15:0] INS_TUNING(input [3:0] timer_reg, input [3:0] tuning_reg);
-        begin INS_TUNING = (4'hF << 12) | (FUNCT_TUNING << 8) | (timer_reg << 4) | tuning_reg; end
-    endfunction
+    // Bit loop: check MSB, output to MOSI
+    localparam [15:0] INS_ADD_x12_x9_x0 = 16'h0C90; // ADD x12, x9, x0 (shift)
+    localparam [15:0] INS_ADDI_x12_01  = 16'h8C01; // check MSB
 
-    function [15:0] INS_PINSEL(input [3:0] pin_reg, input [3:0] src_reg);
-        begin INS_PINSEL = (4'hF << 12) | (FUNCT_PINSEL << 8) | (pin_reg << 4) | src_reg; end
-    endfunction
+    // SCK low
+    localparam [15:0] INS_ADDI_x6_00  = 16'h8600;
+    localparam [15:0] INS_OUT_x6_x6_2 = 16'hF066;
 
-    function [15:0] INS_HALT();
-        begin INS_HALT = 16'hFFFF; end
-    endfunction
+    // Wait half cycle
+    localparam [15:0] INS_WAIT_x4_x13 = 16'hF24D;  // WAIT timer 0, cycles=x13
 
-    function [15:0] INS_NOP();
-        begin INS_NOP = 16'h0000; end
-    endfunction
+    // SCK high
+    localparam [15:0] INS_ADDI_x6_01_2 = 16'h8601;
+    localparam [15:0] INS_OUT_x6_x6_3 = 16'hF066;
 
-    // ============================================================
-    // Initial block: Load SPI Master firmware and start CPU
-    // ============================================================
+    // Wait half cycle
+    localparam [15:0] INS_WAIT_x4_x13_2 = 16'hF24D;
+
+    // Shift left
+    localparam [15:0] INS_ADD_x9_x9_x9 = 16'h0999;  // ADD x9, x9, x9 (shift left)
+
+    // Decrement bit count
+    localparam [15:0] INS_ADDI_x10_ff = 16'h8AFF;  // ADDI x10, -1
+    localparam [15:0] INS_ADD_x10_x10_x11 = 16'h0AAE; // ADD x10, x10, x11 (decrement)
+
+    // Branch if not zero (simplified - use HALT for now)
+    localparam [15:0] INS_HALT        = 16'hFFFF;
+
     initial begin
         rst_n = 0;
         wait_clk(4);
         rst_n = 1;
         wait_clk(4);
 
-        $display("=== SPI Master Test (CPU Architecture) ===");
+        $display("=== emu_top SPI Master Firmware Test ===");
 
-        wait_clk(2);
+        // Load program
+        spi_write(16'h0000, {INS_ADDI_x2_80,  INS_ADDI_x1_00});   // addr 0,1
+        spi_write(16'h0002, {INS_ADDI_x4_00,  INS_ADDI_x3_00});   // addr 2,3
+        spi_write(16'h0004, {INS_ADDI_x6_02,  INS_ADDI_x5_00});   // addr 4,5
+        spi_write(16'h0006, {INS_ADDI_x8_01,  INS_ADDI_x7_03});   // addr 6,7
+        spi_write(16'h0008, {INS_ADDI_x10_08, INS_ADDI_x9_AA});   // addr 8,9
+        spi_write(16'h000A, {INS_ADDI_x12_00, INS_ADDI_x11_01});  // addr 10,11
+        spi_write(16'h000C, {INS_ADDI_x14_01, INS_ADDI_x13_11});  // addr 12,13
+        spi_write(16'h000E, {INS_ADDI_x15_00, INS_DIR_x5});       // addr 14,15
+        spi_write(16'h0010, {INS_DIR_x6,      INS_DIR_x7});       // addr 16,17
+        spi_write(16'h0012, {INS_DIR_x8,      INS_ADDI_x7_00});   // addr 18,19
+        spi_write(16'h0014, {INS_OUT_x7_x7,   INS_ADDI_x6_01});   // addr 20,21
+        spi_write(16'h0016, {INS_OUT_x6_x6,   INS_ADDI_x10_08_2}); // addr 22,23
+        spi_write(16'h0018, {INS_ADDI_x9_AA_2, INS_ADD_x12_x9_x0}); // addr 24,25
+        spi_write(16'h001A, {INS_ADDI_x12_01, INS_ADDI_x6_00});   // addr 26,27
+        spi_write(16'h001C, {INS_OUT_x6_x6_2, INS_WAIT_x4_x13});  // addr 28,29
+        spi_write(16'h001E, {INS_ADDI_x6_01_2, INS_OUT_x6_x6_3}); // addr 30,31
+        spi_write(16'h0020, {INS_WAIT_x4_x13_2, INS_ADD_x9_x9_x9}); // addr 32,33
+        spi_write(16'h0022, {INS_ADDI_x10_ff, INS_ADD_x10_x10_x11}); // addr 34,35
+        spi_write(16'h0024, {INS_HALT,        16'h0000});         // addr 36,37
 
-        // Register allocation:
-        // x4  = Timer index (0)
-        // x5  = MODE_NCO_CLK (3)
-        // x6  = MOSI pin (0)
-        // x7  = MISO pin (1) 
-        // x8  = SCK pin (2)
-        // x9  = CS pin (3)
-        // x10 = Output direction (1)
-        // x11 = Input direction (0)
-        // x12 = Bit counter (8)
-        // x13 = Wait cycles (1)
-        // x14 = Constant 1
-        // x15 = Constant 0 / Tuning high byte selector
-        // xE  = Tuning low byte (0x00)
-        // xF  = Tuning high byte (0x80 with bit 8=1 for REG_TUNING_H)
-        // xD  = PINSEL source for SCK (0x01 = Timer 0 NCO, shifted by CPU)
+        $display("Program loaded. Starting CPU...");
+        spi_run(16'd76);  // 38 instructions * 2 bytes
 
-        // ---- Program: Initialize NCO for 25MHz ----
-        // NCO increment = 0x800000 (25MHz @ 50MHz = 1/2 clock)
-        // Write tuning: REG_TUNING_H = 0x80 (via ADDI 0x80 -> 0xFF80, bit 8=1), REG_TUNING = 0x00
-        spi_write(16'h0000, {INS_ADDI(4'h5, 8'h03), INS_ADDI(4'h4, 8'h00)});  // x4=timer0, x5=MODE=3
-        spi_write(16'h0002, {INS_ADDI(4'h6, 8'h00), INS_ADDI(4'h7, 8'h01)});  // x6=MOSI(0), x7=MISO(1)
-        spi_write(16'h0004, {INS_ADDI(4'h8, 8'h02), INS_ADDI(4'h9, 8'h03)});  // x8=SCK(2), x9=CS(3)
-        spi_write(16'h0006, {INS_ADDI(4'hA, 8'h01), INS_ADDI(4'hB, 8'h00)});  // x10=dir=1, x11=dir=0
-        spi_write(16'h0008, {INS_ADDI(4'hC, 8'h08), INS_ADDI(4'hD, 8'h01)});  // x12=8 bits, x13=wait1
-        spi_write(16'h000A, {INS_ADDI(4'hE, 8'h00), INS_ADDI(4'hF, 8'h00)});  // x14=1, x15=0
-        // PINSEL source for SCK (pin 2): needs source=1 (shifted by CPU to bits [11:8])
-        spi_write(16'h000C, {INS_ADDI(4'hD, 8'h01), INS_NOP()});  // xD=0x01 (source=Timer0 NCO)
-
-        // ---- Write NCO tuning word to timer 0 ----
-        // Write REG_TUNING (low byte) = 0x00 using xE (ORI for zero-extend, bit 8 = 0)
-        spi_write(16'h000E, {INS_TUNING(4'h4, 4'hE), INS_ORI(4'hE, 8'h00)});
-        // Write REG_TUNING_H (high byte) = 0x80 using xF (ADDI for sign-ext, gives 0xFF80, bit 8 = 1)
-        spi_write(16'h0010, {INS_TUNING(4'h4, 4'hF), INS_ADDI(4'hF, 8'h80)});
-
-        // ---- Configure timer 0 NCO mode ----
-        spi_write(16'h0012, {INS_TCFG(4'h4, 4'h5), INS_NOP()});   // TCFG timer0 MODE=3
-
-        // ---- Set up pin directions (MOSI, SCK, CS = output; MISO = input) ----
-        spi_write(16'h0014, {INS_DIR(4'h6, 4'hA), INS_DIR(4'h8, 4'hA)});  // DIR MOSI, DIR SCK
-        spi_write(16'h0016, {INS_DIR(4'h9, 4'hA), INS_DIR(4'h7, 4'hB)});  // DIR CS, DIR MISO (input)
-        
-        // ---- Pin select: SCK (pin 2) driven by Timer 0 NCO (source=1 in bits [11:8]) ----
-        spi_write(16'h0018, {INS_PINSEL(4'h8, 4'hD), INS_NOP()});  // PINSEL SCK, xD=0x01
-
-        // ---- Initial state: CS high, MOSI low ----
-        spi_write(16'h001A, {INS_OUT(4'h9, 4'hE), INS_OUT(4'h6, 4'hF)});  // CS=1, MOSI=0
-
-        // ---- Send 8 bits: 0xA5 = 10100101 (MSB first) ----
-        // Bit 7: 1
-        spi_write(16'h001C, {INS_OUT(4'h9, 4'hF), INS_OUT(4'h6, 4'hE)});  // CS=0, MOSI=1
-        spi_write(16'h001E, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // Wait 2 cycles (SCK rise+fall)
-        
-        // Bit 6: 0
-        spi_write(16'h0020, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
-        spi_write(16'h0022, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
-        
-        // Bit 5: 1
-        spi_write(16'h0024, {INS_OUT(4'h6, 4'hE), INS_WAIT(4'h4, 4'hD)});  // MOSI=1, wait
-        spi_write(16'h0026, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
-        
-        // Bit 4: 0
-        spi_write(16'h0028, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
-        spi_write(16'h002A, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
-        
-        // Bit 3: 0
-        spi_write(16'h002C, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
-        spi_write(16'h002E, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
-        
-        // Bit 2: 1
-        spi_write(16'h0030, {INS_OUT(4'h6, 4'hE), INS_WAIT(4'h4, 4'hD)});  // MOSI=1, wait
-        spi_write(16'h0032, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
-        
-        // Bit 1: 0
-        spi_write(16'h0034, {INS_OUT(4'h6, 4'hF), INS_WAIT(4'h4, 4'hD)});  // MOSI=0, wait
-        spi_write(16'h0036, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
-        
-        // Bit 0: 1
-        spi_write(16'h0038, {INS_OUT(4'h6, 4'hE), INS_WAIT(4'h4, 4'hD)});  // MOSI=1, wait
-        spi_write(16'h003A, {INS_WAIT(4'h4, 4'hD), INS_WAIT(4'h4, 4'hD)}); // wait 2
-
-        // ---- CS high (end transaction) ----
-        spi_write(16'h003C, {INS_OUT(4'h9, 4'hE), INS_HALT()});  // CS=1, HALT
-
-        $display("Program loaded (31 instructions). Starting CPU...");
-        spi_run(16'd62);  // 31 instruction pairs = 62 instructions
-
-        wait_clk(50000);
+        // Wait for CPU to complete
+        wait_clk(500000);
 
         $display("=== CPU Registers ===");
-        $display("R4 (timer): %h", dut.u_cpu.reg_debug[4]);
-        $display("R5 (MODE): %h", dut.u_cpu.reg_debug[5]);
-        $display("R6 (MOSI): %h", dut.u_cpu.reg_debug[6]);
-        $display("R7 (MISO): %h", dut.u_cpu.reg_debug[7]);
-        $display("R8 (SCK): %h", dut.u_cpu.reg_debug[8]);
-        $display("R9 (CS): %h", dut.u_cpu.reg_debug[9]);
-        $display("R10 (dir_out): %h", dut.u_cpu.reg_debug[10]);
-        $display("R11 (dir_in): %h", dut.u_cpu.reg_debug[11]);
-        $display("R12 (bit cnt): %h", dut.u_cpu.reg_debug[12]);
-        $display("R13 (wait): %h", dut.u_cpu.reg_debug[13]);
-        $display("R14 (const1): %h", dut.u_cpu.reg_debug[14]);
-        $display("R15 (const0/tuning): %h", dut.u_cpu.reg_debug[15]);
-        $display("RD (pin_sel src): %h", dut.u_cpu.reg_debug[13]);
+        // Use debug register read port
+        dbg_reg_idx = 4'd0; wait_clk(1); $display("R0 (x0): %h", dbg_reg_data);
+        dbg_reg_idx = 4'd1; wait_clk(1); $display("R1 (x1): %h (NCO low)", dbg_reg_data);
+        dbg_reg_idx = 4'd2; wait_clk(1); $display("R2 (x2): %h (NCO mid)", dbg_reg_data);
+        dbg_reg_idx = 4'd3; wait_clk(1); $display("R3 (x3): %h (NCO high)", dbg_reg_data);
+        dbg_reg_idx = 4'd5; wait_clk(1); $display("R5 (x5): %h (MOSI pin)", dbg_reg_data);
+        dbg_reg_idx = 4'd6; wait_clk(1); $display("R6 (x6): %h (SCK pin)", dbg_reg_data);
+        dbg_reg_idx = 4'd7; wait_clk(1); $display("R7 (x7): %h (CS pin)", dbg_reg_data);
+        dbg_reg_idx = 4'd9; wait_clk(1); $display("R9 (x9): %h (TX data)", dbg_reg_data);
+        dbg_reg_idx = 4'd10; wait_clk(1); $display("R10 (x10): %h (bit cnt)", dbg_reg_data);
+        dbg_reg_idx = 4'd11; wait_clk(1); $display("R11 (x11): %h (const1)", dbg_reg_data);
+        dbg_reg_idx = 4'd12; wait_clk(1); $display("R12 (x12): %h (shift)", dbg_reg_data);
+        dbg_reg_idx = 4'd13; wait_clk(1); $display("R13 (x13): %h (wait)", dbg_reg_data);
+        dbg_reg_idx = 4'd14; wait_clk(1); $display("R14 (x14): %h (const1)", dbg_reg_data);
+        dbg_reg_idx = 4'd15; wait_clk(1); $display("R15 (x15): %h (const0/tuning)", dbg_reg_data);
         $display("PC: %h", dut.u_cpu.pc_debug);
         
         $display("=== Pin Status ===");

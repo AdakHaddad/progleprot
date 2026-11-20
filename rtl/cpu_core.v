@@ -38,7 +38,10 @@ module cpu_core #(
     output wire                    cpu_done,
     output wire                    cpu_error,
     // Debug
-    output wire [ADDR_W-1:0]       pc_debug
+    output wire [ADDR_W-1:0]       pc_debug,
+    // Debug register read port
+    input  wire [3:0]              dbg_reg_idx,
+    output wire [15:0]             dbg_reg_data
     // Note: reg_debug array removed for Yosys compatibility
 );
 
@@ -522,5 +525,8 @@ module cpu_core #(
     assign cpu_done = !cpu_running && (pipe_st == S_IF || wb_is_halt);
     assign cpu_error = 1'b0;
     assign pc_debug = pc;
+
+    // Debug register read port
+    assign dbg_reg_data = regs[dbg_reg_idx];
 
 endmodule

@@ -27,7 +27,10 @@ module emu_top #(
     input  wire                    spi_cs_n,
     // Status
     output wire                    cpu_running,
-    output wire                    cpu_error
+    output wire                    cpu_error,
+    // Debug
+    input  wire [3:0]              dbg_reg_idx,
+    output wire [15:0]             dbg_reg_data
 );
 
     // ------------------------------------------------------------------------
@@ -109,7 +112,9 @@ module emu_top #(
         .cpu_start(cpu_start),
         .cpu_done(cpu_done),
         .cpu_error(cpu_err),
-        .pc_debug(cpu_pc_debug)
+        .pc_debug(cpu_pc_debug),
+        .dbg_reg_idx(dbg_reg_idx),
+        .dbg_reg_data(dbg_reg_data)
     );
 
     // CPU pin register updates (from custom instructions)
