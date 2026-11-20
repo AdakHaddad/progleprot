@@ -17,6 +17,10 @@ module tb_emu_i2c_master;
     wire [7:0] uio_out;
     wire [7:0] uio_oe;
 
+    // Debug register interface
+    reg [3:0] dbg_reg_idx = 4'd0;
+    wire [15:0] dbg_reg_data;
+
     emu_top #(
         .NUM_PINS(8),
         .PROG_DEPTH(2048),
@@ -33,7 +37,9 @@ module tb_emu_i2c_master;
         .spi_miso(uio_out[0]),
         .spi_cs_n(uio_in[2]),
         .cpu_running(uio_out[1]),
-        .cpu_error(uio_out[2])
+        .cpu_error(uio_out[2]),
+        .dbg_reg_idx(dbg_reg_idx),
+        .dbg_reg_data(dbg_reg_data)
     );
 
     always #10 clk = ~clk;
@@ -86,179 +92,205 @@ module tb_emu_i2c_master;
         end
     endtask
 
-    // Instruction encoding for CPU ISA
-    function [15:0] INS_ADDI(input [3:0] rd, input [7:0] imm);
-        begin INS_ADDI = (4'h8 << 12) | (rd << 8) | imm; end
-    endfunction
+    // I²C firmware instructions (pre-computed 16-bit)
+    // ISA encoding:
+    // ADDI rd, imm:  0x8rd0 | imm8
+    // ADD rd,rs1,rs2: 0x0rd0 | rs1<<4 | rs2
+    // OUT pin,val:   0xF000 | pin<<4 | val
+    // DIR pin,dir:   0xF100 | pin<<4 | dir
+    // WAIT timer,cycles: 0xF200 | timer<<4 | cycles
+    // TCFG timer,cfg: 0xF500 | timer<<4 | cfg
+    // PINSEL pin,src: 0xF600 | pin<<4 | src
+    // HALT:          0xFFFF
 
-    function [15:0] INS_ORI(input [3:0] rd, input [7:0] imm);
-        begin INS_ORI = (4'h9 << 12) | (rd << 8) | imm; end
-    endfunction
+    // I²C @ 100kHz: NCO increment = (100_000 / 50_000_000) * 2^24 = 335544 = 0x51EB8
+    // Low 16: 0x1EB8, High 8: 0x05
+    
+    // ADDI x1, 0xB8   -> 0x81B8 (NCO low)
+    // ADDI x9, 0x1E   -> 0x891E (NCO mid)
+    // ADDI x10, 0x05  -> 0x8A05 (NCO high)
+    // ADDI x11, 0x00  -> 0x8B00 (timer 0)
+    // ADDI x12, 0x03  -> 0x8C03 (MODE_NCO_CLK=3)
+    // TCFG x11, x12   -> 0xF5B3 (funct=5, rs1=11, rs2=12)
 
-    function [15:0] INS_ADD(input [3:0] rd, input [3:0] rs1, input [3:0] rs2);
-        begin INS_ADD = (4'h0 << 12) | (rd << 8) | (rs1 << 4) | rs2; end
-    endfunction
+    localparam [15:0] INS_ADDI_x1_B8  = 16'h81B8;
+    localparam [15:0] INS_ADDI_x9_1E  = 16'h891E;
+    localparam [15:0] INS_ADDI_x10_05 = 16'h8A05;
+    localparam [15:0] INS_ADDI_x11_00 = 16'h8B00;
+    localparam [15:0] INS_ADDI_x12_03 = 16'h8C03;
+    localparam [15:0] INS_TCFG_x11_x12 = 16'hF5B3;  // TCFG timer 0, mode 3
 
-    // Custom instruction funct codes
-    localparam FUNCT_OUT    = 4'h0;
-    localparam FUNCT_DIR    = 4'h1;
-    localparam FUNCT_WAIT   = 4'h2;
-    localparam FUNCT_TCFG   = 4'h5;
-    localparam FUNCT_TUNING = 4'h6;
-    localparam FUNCT_PINSEL = 4'h7;
-    localparam FUNCT_HALT   = 4'hF;
+    // Pin setup: SDA=pin0 (out), SCL=pin1 (out, NCO driven)
+    localparam [15:0] INS_ADDI_x2_00  = 16'h8200;  // SDA pin
+    localparam [15:0] INS_ADDI_x13_01 = 16'h8D01;  // dir = output
+    localparam [15:0] INS_DIR_x2_x13  = 16'hF12D;  // DIR pin 0, dir=1
+    localparam [15:0] INS_ADDI_x3_01  = 16'h8301;  // SCL pin
+    localparam [15:0] INS_DIR_x3_x13  = 16'hF13D;  // DIR pin 1, dir=1
+    localparam [15:0] INS_ADDI_x14_01 = 16'h8E01;  // src = Timer 0 NCO
+    localparam [15:0] INS_PINSEL_x3_x14 = 16'hF63E; // PINSEL pin 1, src=1
 
-    function [15:0] INS_OUT(input [3:0] pin_reg, input [3:0] val_reg);
-        begin INS_OUT = (4'hF << 12) | (FUNCT_OUT << 8) | (pin_reg << 4) | val_reg; end
-    endfunction
+    // Constants
+    localparam [15:0] INS_ADDI_x11_01 = 16'h8B01;  // const 1
+    localparam [15:0] INS_ADDI_x12_00 = 16'h8C00;  // const 0
+    localparam [15:0] INS_ADDI_x8_64  = 16'h8864;  // wait 100
 
-    function [15:0] INS_DIR(input [3:0] pin_reg, input [3:0] dir_reg);
-        begin INS_DIR = (4'hF << 12) | (FUNCT_DIR << 8) | (pin_reg << 4) | dir_reg; end
-    endfunction
+    // I²C idle: both high
+    localparam [15:0] INS_ADDI_x5_01  = 16'h8501;  // val = 1
+    localparam [15:0] INS_OUT_x2_x5   = 16'hF025;  // SDA = 1
+    localparam [15:0] INS_OUT_x3_x5_2 = 16'hF035;  // SCL = 1
+    localparam [15:0] INS_WAIT_x11_x8 = 16'hF2B8;  // WAIT timer 0, cycles=x8
 
-    function [15:0] INS_WAIT(input [3:0] timer_reg, input [3:0] cycles_reg);
-        begin INS_WAIT = (4'hF << 12) | (FUNCT_WAIT << 8) | (timer_reg << 4) | cycles_reg; end
-    endfunction
+    // START: SDA falls while SCL high
+    localparam [15:0] INS_ADDI_x5_00  = 16'h8500;  // val = 0
+    localparam [15:0] INS_OUT_x2_x5_2 = 16'hF025;  // SDA = 0
+    localparam [15:0] INS_ADDI_x8_32  = 16'h8832;  // wait 50
+    localparam [15:0] INS_WAIT_x11_x8_2 = 16'hF2B8;
 
-    function [15:0] INS_TCFG(input [3:0] timer_reg, input [3:0] config_reg);
-        begin INS_TCFG = (4'hF << 12) | (FUNCT_TCFG << 8) | (timer_reg << 4) | config_reg; end
-    endfunction
+    // SCL = 0
+    localparam [15:0] INS_OUT_x3_x5_3 = 16'hF035;  // SCL = 0
+    localparam [15:0] INS_WAIT_x11_x8_3 = 16'hF2B8;
 
-    function [15:0] INS_TUNING(input [3:0] timer_reg, input [3:0] tuning_reg);
-        begin INS_TUNING = (4'hF << 12) | (FUNCT_TUNING << 8) | (timer_reg << 4) | tuning_reg; end
-    endfunction
+    // Send address byte 0xA0 (8 bits)
+    // Bit 7: 1 -> SDA = 1
+    localparam [15:0] INS_ADDI_x5_01_2 = 16'h8501;
+    localparam [15:0] INS_OUT_x2_x5_3  = 16'hF025;
+    localparam [15:0] INS_ADDI_x8_32_2 = 16'h8832;
+    localparam [15:0] INS_WAIT_x11_x8_4 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_5 = 16'hF2B8;
 
-    function [15:0] INS_PINSEL(input [3:0] pin_reg, input [3:0] src_reg);
-        begin INS_PINSEL = (4'hF << 12) | (FUNCT_PINSEL << 8) | (pin_reg << 4) | src_reg; end
-    endfunction
+    // Bit 6: 0 -> SDA = 0
+    localparam [15:0] INS_ADDI_x5_00_2 = 16'h8500;
+    localparam [15:0] INS_OUT_x2_x5_4  = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_6 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_7 = 16'hF2B8;
 
-    function [15:0] INS_HALT();
-        begin INS_HALT = 16'hFFFF; end
-    endfunction
+    // Bit 5: 1 -> SDA = 1
+    localparam [15:0] INS_ADDI_x5_01_3 = 16'h8501;
+    localparam [15:0] INS_OUT_x2_x5_5  = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_8 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_9 = 16'hF2B8;
 
-    function [15:0] INS_NOP();
-        begin INS_NOP = 16'h0000; end
-    endfunction
+    // Bit 4: 0 -> SDA = 0
+    localparam [15:0] INS_ADDI_x5_00_3 = 16'h8500;
+    localparam [15:0] INS_OUT_x2_x5_6  = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_10 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_11 = 16'hF2B8;
 
-    // ============================================================
-    // Initial block: Load I²C Master firmware and start CPU
-    // ============================================================
+    // Bit 3: 0 -> SDA = 0
+    localparam [15:0] INS_ADDI_x5_00_4 = 16'h8500;
+    localparam [15:0] INS_OUT_x2_x5_7  = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_12 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_13 = 16'hF2B8;
+
+    // Bit 2: 1 -> SDA = 1
+    localparam [15:0] INS_ADDI_x5_01_4 = 16'h8501;
+    localparam [15:0] INS_OUT_x2_x5_8  = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_14 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_15 = 16'hF2B8;
+
+    // Bit 1: 0 -> SDA = 0
+    localparam [15:0] INS_ADDI_x5_00_5 = 16'h8500;
+    localparam [15:0] INS_OUT_x2_x5_9  = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_16 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_17 = 16'hF2B8;
+
+    // Bit 0: 0 -> SDA = 0
+    localparam [15:0] INS_ADDI_x5_00_6 = 16'h8500;
+    localparam [15:0] INS_OUT_x2_x5_10 = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_18 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_19 = 16'hF2B8;
+
+    // Release SDA for ACK
+    localparam [15:0] INS_ADDI_x5_01_5 = 16'h8501;
+    localparam [15:0] INS_OUT_x2_x5_11 = 16'hF025;
+    localparam [15:0] INS_WAIT_x11_x8_20 = 16'hF2B8;
+    localparam [15:0] INS_WAIT_x11_x8_21 = 16'hF2B8;
+
+    // SCL = 0
+    localparam [15:0] INS_ADDI_x5_00_7 = 16'h8500;
+    localparam [15:0] INS_OUT_x3_x5_4  = 16'hF035;
+    localparam [15:0] INS_WAIT_x11_x8_22 = 16'hF2B8;
+
+    // STOP: SDA rises while SCL high
+    localparam [15:0] INS_ADDI_x5_00_8 = 16'h8500;
+    localparam [15:0] INS_OUT_x2_x5_12 = 16'hF025;  // SDA = 0
+    localparam [15:0] INS_ADDI_x5_01_6 = 16'h8501;
+    localparam [15:0] INS_OUT_x3_x5_5  = 16'hF035;  // SCL = 1
+    localparam [15:0] INS_WAIT_x11_x8_23 = 16'hF2B8;
+    localparam [15:0] INS_OUT_x2_x5_13 = 16'hF025;  // SDA = 1 (STOP)
+    localparam [15:0] INS_WAIT_x11_x8_24 = 16'hF2B8;
+
+    localparam [15:0] INS_HALT = 16'hFFFF;
+
     initial begin
         rst_n = 0;
         wait_clk(4);
         rst_n = 1;
         wait_clk(4);
 
-        $display("=== I²C Master Test (CPU Architecture) ===");
+        $display("=== emu_top I²C Master Firmware Test ===");
 
-        // I²C pins: ui_in[0]=SDA, ui_in[1]=SCL
-        // Idle: SDA=1, SCL=1 (both released, pulled up)
-        ui_in = 8'h03;  // 00000011: SDA=1, SCL=1
-        wait_clk(2);
+        // Load program
+        spi_write(16'h0000, {INS_ADDI_x9_1E,   INS_ADDI_x1_B8});     // addr 0,1
+        spi_write(16'h0002, {INS_ADDI_x11_00,  INS_ADDI_x10_05});    // addr 2,3
+        spi_write(16'h0004, {INS_ADDI_x13_01,  INS_ADDI_x12_03});    // addr 4,5
+        spi_write(16'h0006, {INS_TCFG_x11_x12, INS_ADDI_x2_00});     // addr 6,7
+        spi_write(16'h0008, {INS_ADDI_x14_01,  INS_DIR_x2_x13});     // addr 8,9
+        spi_write(16'h000A, {INS_DIR_x3_x13,   INS_PINSEL_x3_x14});  // addr 10,11
+        spi_write(16'h000C, {INS_ADDI_x11_01,  INS_ADDI_x12_00});    // addr 12,13
+        spi_write(16'h000E, {INS_ADDI_x8_64,   INS_ADDI_x5_01});     // addr 14,15
+        spi_write(16'h0010, {INS_OUT_x2_x5,    INS_OUT_x3_x5_2});    // addr 16,17
+        spi_write(16'h0012, {INS_WAIT_x11_x8,  INS_ADDI_x5_00});     // addr 18,19
+        spi_write(16'h0014, {INS_OUT_x2_x5_2,  INS_ADDI_x8_32});     // addr 20,21
+        spi_write(16'h0016, {INS_WAIT_x11_x8_2, INS_OUT_x3_x5_3});   // addr 22,23
+        spi_write(16'h0018, {INS_WAIT_x11_x8_3, INS_ADDI_x5_01_2});  // addr 24,25
+        spi_write(16'h001A, {INS_OUT_x2_x5_3,  INS_ADDI_x8_32_2});   // addr 26,27
+        spi_write(16'h001C, {INS_WAIT_x11_x8_4, INS_WAIT_x11_x8_5}); // addr 28,29
+        spi_write(16'h001E, {INS_ADDI_x5_00_2, INS_OUT_x2_x5_4});    // addr 30,31
+        spi_write(16'h0020, {INS_WAIT_x11_x8_6, INS_WAIT_x11_x8_7}); // addr 32,33
+        spi_write(16'h0022, {INS_ADDI_x5_01_3, INS_OUT_x2_x5_5});    // addr 34,35
+        spi_write(16'h0024, {INS_WAIT_x11_x8_8, INS_WAIT_x11_x8_9}); // addr 36,37
+        spi_write(16'h0026, {INS_ADDI_x5_00_3, INS_OUT_x2_x5_6});    // addr 38,39
+        spi_write(16'h0028, {INS_WAIT_x11_x8_10, INS_WAIT_x11_x8_11}); // addr 40,41
+        spi_write(16'h002A, {INS_ADDI_x5_00_4, INS_OUT_x2_x5_7});    // addr 42,43
+        spi_write(16'h002C, {INS_WAIT_x11_x8_12, INS_WAIT_x11_x8_13}); // addr 44,45
+        spi_write(16'h002E, {INS_ADDI_x5_01_4, INS_OUT_x2_x5_8});    // addr 46,47
+        spi_write(16'h0030, {INS_WAIT_x11_x8_14, INS_WAIT_x11_x8_15}); // addr 48,49
+        spi_write(16'h0032, {INS_ADDI_x5_00_5, INS_OUT_x2_x5_9});    // addr 50,51
+        spi_write(16'h0034, {INS_WAIT_x11_x8_16, INS_WAIT_x11_x8_17}); // addr 52,53
+        spi_write(16'h0036, {INS_ADDI_x5_00_6, INS_OUT_x2_x5_10});   // addr 54,55
+        spi_write(16'h0038, {INS_WAIT_x11_x8_18, INS_WAIT_x11_x8_19}); // addr 56,57
+        spi_write(16'h003A, {INS_ADDI_x5_01_5, INS_OUT_x2_x5_11});   // addr 58,59
+        spi_write(16'h003C, {INS_WAIT_x11_x8_20, INS_WAIT_x11_x8_21}); // addr 60,61
+        spi_write(16'h003E, {INS_ADDI_x5_00_7, INS_OUT_x3_x5_4});    // addr 62,63
+        spi_write(16'h0040, {INS_WAIT_x11_x8_22, INS_ADDI_x5_00_8}); // addr 64,65
+        spi_write(16'h0042, {INS_OUT_x2_x5_12,  INS_ADDI_x5_01_6});  // addr 66,67
+        spi_write(16'h0044, {INS_OUT_x3_x5_5,   INS_WAIT_x11_x8_23}); // addr 68,69
+        spi_write(16'h0046, {INS_OUT_x2_x5_13,  INS_WAIT_x11_x8_24}); // addr 70,71
+        spi_write(16'h0048, {INS_HALT,          16'h0000});           // addr 72,73
 
-        // ============================================================
-        // Firmware: I²C Master at ~100kHz using NCO timer for SCL
-        // SCL is driven by Timer 0 NCO (via pin matrix PINSEL)
-        // SDA is driven by CPU OUT instructions
-        // ============================================================
-        // Register allocation:
-        // x4  = Timer index (0)
-        // x5  = MODE_NCO_CLK (3)
-        // x6  = SDA pin (0)
-        // x7  = SCL pin (1)
-        // x8  = Output direction (1) - NEEDED FOR DIR INSTRUCTION
-        // x9  = Wait cycles (100) - ~1 SCL cycle at 100kHz = 500 CPU cycles @ 50MHz
-        // x10 = Wait cycles (25) - quarter cycle
-        // x11 = Constant 1 (for OUT=1/release)
-        // x12 = Constant 0 (for OUT=0/drive low)
-        // x13 = Pin select source for SCL (Timer 0 NCO = 1, needs to be in bits [7:4] = 0x10)
-        // x14 = Tuning low byte (0xB8) / Slave address (0xA0)
-        // x15 = Tuning high byte (0xFF80 with ADDI sign-ext, bit 8=1) / temp
+        $display("Program loaded. Starting CPU...");
+        spi_run(16'd148);  // 74 instructions * 2 bytes
 
-        // ---- Program: Initialize NCO for ~100kHz ----
-        // NCO increment = 0x80B8 (32952) for ~98kHz @ 50MHz
-        // Write tuning: REG_TUNING_H = 0x80 (via ADDI 0x80 -> 0xFF80, bit 8=1), REG_TUNING = 0xB8
-        // x4=0, x5=3
-        spi_write(16'h0000, {INS_ADDI(4'h5, 8'h03), INS_ADDI(4'h4, 8'h00)});  // x4=timer0, x5=MODE=3
-        spi_write(16'h0002, {INS_ADDI(4'h7, 8'h01), INS_ADDI(4'h6, 8'h00)});  // x6=SDA(0), x7=SCL(1)
-        spi_write(16'h0004, {INS_ADDI(4'h9, 8'h64), INS_ADDI(4'h8, 8'h01)});  // x8=dir=1, x9=wait100
-        spi_write(16'h0006, {INS_ADDI(4'hB, 8'h19), INS_ADDI(4'hA, 8'h19)});  // x10=wait25, x11=const1
-        spi_write(16'h0008, {INS_TCFG(4'h4, 4'h5), INS_ADDI(4'hC, 8'h00)});   // x12=const0, TCFG timer0 MODE
-
-        // ---- Write NCO tuning word to timer 0 ----
-        // Write REG_TUNING (low byte) = 0xB8 using x14 (ORI for zero-extend, bit 8 = 0)
-        spi_write(16'h000A, {INS_TUNING(4'h4, 4'hE), INS_ORI(4'hE, 8'hB8)});  // x14=0xB8, TUNING timer0 low
-        // Write REG_TUNING_H (high byte) = 0x80 using x15 (ADDI for sign-ext, gives 0xFF80, bit 8 = 1)
-        spi_write(16'h000C, {INS_TUNING(4'h4, 4'hF), INS_ADDI(4'hF, 8'h80)});  // x15=0xFF80 (bit 8=1), TUNING timer0 high
-
-        // ---- Set up pin directions (open-drain outputs) ----
-        spi_write(16'h000E, {INS_DIR(4'h6, 4'h8), INS_DIR(4'h7, 4'h8)});        // DIR SDA, DIR SCL (both output, x8=1)
-        
-        // ---- Pin select: SCL (pin 1) driven by Timer 0 NCO ----
-        // PINSEL for pin 1 needs source in bits [7:4] = 0x10 (Timer 0 NCO)
-        spi_write(16'h0010, {INS_PINSEL(4'h7, 4'hD), INS_ADDI(4'hD, 8'h10)});  // x13=0x10, PINSEL SCL, Timer0
-
-        // ---- Slave address ----
-        spi_write(16'h0012, {INS_ADDI(4'hF, 8'h08), INS_ADDI(4'hE, 8'hA0)});   // x14=0xA0 (slave addr), x15=8 (bit count)
-
-        // ---- I²C idle: both lines high (released) ----
-        // SCL is driven by NCO, SDA by CPU
-        spi_write(16'h0014, {INS_OUT(4'h6, 4'hB), INS_NOP()});       // OUT SDA=1 (x11) - release
-        spi_write(16'h0016, {INS_WAIT(4'hB, 4'h9), INS_WAIT(4'hB, 4'h9)});      // WAIT 100 cycles
-
-        // ---- I²C START condition: SDA falls while SCL high ----
-        spi_write(16'h0018, {INS_ADDI(4'hF, 8'h08), INS_OUT(4'h6, 4'hC)});     // OUT SDA=0 (x12), x15=8 (bit counter)
-        spi_write(16'h001A, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});      // WAIT 25 cycles (quarter period)
-
-        // ---- Send 8 bits (simplified: SDA=0 for all 8 SCL cycles) ----
-        // 8 bits * 4 quarter-periods = 32 WAITs
-        spi_write(16'h001C, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h001E, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0020, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0022, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0024, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0026, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0028, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h002A, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h002C, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h002E, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0030, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0032, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0034, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0036, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h0038, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-        spi_write(16'h003A, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});
-
-        // ---- ACK bit: release SDA, read ACK ----
-        spi_write(16'h003C, {INS_WAIT(4'hB, 4'hA), INS_OUT(4'h6, 4'hB)});       // OUT SDA=1 (release), WAIT
-        spi_write(16'h003E, {INS_WAIT(4'hB, 4'hA), INS_NOP()});                  // WAIT
-
-        // ---- I²C STOP condition: SDA rises while SCL high ----
-        // Need to hold SCL high and raise SDA. But SCL is NCO-driven.
-        // We can't easily stop NCO. Instead, just keep SDA high.
-        spi_write(16'h0040, {INS_OUT(4'h6, 4'hC), INS_NOP()});                   // SDA=0
-        spi_write(16'h0042, {INS_WAIT(4'hB, 4'hA), INS_WAIT(4'hB, 4'hA)});      // WAIT
-        spi_write(16'h0044, {INS_OUT(4'h6, 4'hB), INS_NOP()});                   // SDA=1 (STOP)
-        spi_write(16'h0046, {INS_WAIT(4'hB, 4'h9), INS_HALT()});                 // WAIT 100, HALT
-
-        $display("Program loaded (37 instructions). Starting CPU...");
-        spi_run(16'd74);  // 37 instruction pairs = 74 instructions
-
-        wait_clk(50000);
+        // Wait for CPU to complete
+        wait_clk(2000000);
 
         $display("=== CPU Registers ===");
-        $display("R4 (timer): %h", dut.u_cpu.reg_debug[4]);
-        $display("R5 (MODE): %h", dut.u_cpu.reg_debug[5]);
-        $display("R6 (SDA pin): %h", dut.u_cpu.reg_debug[6]);
-        $display("R7 (SCL pin): %h", dut.u_cpu.reg_debug[7]);
-        $display("R8 (dir): %h", dut.u_cpu.reg_debug[8]);
-        $display("R9 (wait100): %h", dut.u_cpu.reg_debug[9]);
-        $display("R10 (wait25): %h", dut.u_cpu.reg_debug[10]);
-        $display("R11 (const1): %h", dut.u_cpu.reg_debug[11]);
-        $display("R12 (const0): %h", dut.u_cpu.reg_debug[12]);
-        $display("R13 (sel src): %h", dut.u_cpu.reg_debug[13]);
-        $display("R14 (slave addr): %h", dut.u_cpu.reg_debug[14]);
-        $display("R15 (bit cnt): %h", dut.u_cpu.reg_debug[15]);
+        // Use debug register read port
+        dbg_reg_idx = 4'd0; wait_clk(1); $display("R0 (x0): %h", dbg_reg_data);
+        dbg_reg_idx = 4'd1; wait_clk(1); $display("R1 (x1): %h (NCO low)", dbg_reg_data);
+        dbg_reg_idx = 4'd2; wait_clk(1); $display("R2 (x2): %h (SDA pin)", dbg_reg_data);
+        dbg_reg_idx = 4'd3; wait_clk(1); $display("R3 (x3): %h (SCL pin)", dbg_reg_data);
+        dbg_reg_idx = 4'd4; wait_clk(1); $display("R4 (x4): %h (slave addr)", dbg_reg_data);
+        dbg_reg_idx = 4'd5; wait_clk(1); $display("R5 (x5): %h (data/val)", dbg_reg_data);
+        dbg_reg_idx = 4'd8; wait_clk(1); $display("R8 (x8): %h (wait)", dbg_reg_data);
+        dbg_reg_idx = 4'd9; wait_clk(1); $display("R9 (x9): %h (NCO mid)", dbg_reg_data);
+        dbg_reg_idx = 4'd10; wait_clk(1); $display("R10 (x10): %h (NCO high)", dbg_reg_data);
+        dbg_reg_idx = 4'd11; wait_clk(1); $display("R11 (x11): %h (timer/const1)", dbg_reg_data);
+        dbg_reg_idx = 4'd12; wait_clk(1); $display("R12 (x12): %h (const0/mode)", dbg_reg_data);
+        dbg_reg_idx = 4'd13; wait_clk(1); $display("R13 (x13): %h (dir)", dbg_reg_data);
+        dbg_reg_idx = 4'd14; wait_clk(1); $display("R14 (x14): %h (pin sel src)", dbg_reg_data);
+        dbg_reg_idx = 4'd15; wait_clk(1); $display("R15 (x15): %h", dbg_reg_data);
         $display("PC: %h", dut.u_cpu.pc_debug);
         
         $display("=== Pin Status ===");
@@ -301,6 +333,6 @@ module tb_emu_i2c_master;
     end
 
     // Timeout
-    initial begin #5000000; $display("TIMEOUT"); $finish; end
+    initial begin #1000000; $display("TIMEOUT"); $finish; end
 
 endmodule
