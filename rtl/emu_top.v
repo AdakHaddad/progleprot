@@ -55,7 +55,6 @@ module emu_top #(
 
     // Debug outputs from CPU
     wire [ADDR_W-1:0]  cpu_pc_debug;
-    wire [15:0]        cpu_reg_debug [0:15];
 
     // Timer coprocessor
     wire [NUM_PINS-1:0] timer_nco_clk;
@@ -110,8 +109,7 @@ module emu_top #(
         .cpu_start(cpu_start),
         .cpu_done(cpu_done),
         .cpu_error(cpu_err),
-        .pc_debug(cpu_pc_debug),
-        .reg_debug(cpu_reg_debug)
+        .pc_debug(cpu_pc_debug)
     );
 
     // CPU pin register updates (from custom instructions)

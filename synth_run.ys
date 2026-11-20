@@ -1,0 +1,4 @@
+read_verilog -sv /workspace/rtl/emu_top.v /workspace/rtl/cpu_core.v /workspace/rtl/timer_coproc.v /workspace/rtl/pin_matrix.v /workspace/rtl/host_if.v /workspace/rtl/prog_ram.v
+hierarchy -top emu_top
+synth -top emu_top -run coarse
+stat

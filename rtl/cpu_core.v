@@ -38,8 +38,8 @@ module cpu_core #(
     output wire                    cpu_done,
     output wire                    cpu_error,
     // Debug
-    output wire [ADDR_W-1:0]       pc_debug,
-    output wire [15:0]             reg_debug [0:15]
+    output wire [ADDR_W-1:0]       pc_debug
+    // Note: reg_debug array removed for Yosys compatibility
 );
 
     // ISA Opcodes
@@ -522,13 +522,5 @@ module cpu_core #(
     assign cpu_done = !cpu_running && (pipe_st == S_IF || wb_is_halt);
     assign cpu_error = 1'b0;
     assign pc_debug = pc;
-
-    // Debug register access
-    genvar g;
-    generate
-        for (g = 0; g < 16; g = g + 1) begin : reg_dbg
-            assign reg_debug[g] = regs[g];
-        end
-    endgenerate
 
 endmodule
