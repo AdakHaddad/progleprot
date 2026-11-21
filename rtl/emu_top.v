@@ -193,32 +193,23 @@ module emu_top #(
     );
 
     // ------------------------------------------------------------------------
-    // Program Memory (single bank for now - dual-bank for future hot-swap)
+    // Program Memory (using prog_ram module with block RAM inference)
     // ------------------------------------------------------------------------
-    reg [PROG_W-1:0] prog_ram [0:PROG_DEPTH-1];
-    reg [10:0]       prog_len;
+    prog_ram #(
+        .DEPTH(PROG_DEPTH),
+        .WIDTH(PROG_W),
+        .ADDR_W(11)  // 2048 = 2^11
+    ) u_prog_ram (
+        .clk(clk),
+        .rst_n(rst_n),
+        .host_wr_en(host_ram_wr_en),
+        .host_wr_addr(host_ram_wr_addr[10:0]),
+        .host_wr_data(host_ram_wr_data),
+        .seq_rd_addr(cpu_prog_addr[10:0]),
+        .seq_rd_data(prog_rd_data)
+    );
 
-    // Host writes directly to program RAM
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            prog_len <= 0;
-            for (integer i = 0; i < PROG_DEPTH; i = i + 1) begin
-                prog_ram[i] <= 16'h0000;
-            end
-        end else begin
-            if (host_ram_wr_en) begin
-                prog_ram[host_ram_wr_addr[10:0]] <= host_ram_wr_data;
-                if (host_ram_wr_addr[10:0] >= prog_len) prog_len <= host_ram_wr_addr[10:0] + 1;
-                $display("t=%0t [EMU_TOP] Host write: addr=%h data=%h prog_len=%d", 
-                         $time, host_ram_wr_addr, host_ram_wr_data, prog_len);
-            end
-        end
-    end
-
-    // CPU reads from program RAM
-    assign prog_rd_data = prog_ram[prog_rd_addr[10:0]];
     assign cpu_prog_data = prog_rd_data;
-    assign prog_rd_addr = cpu_prog_addr;
 
     // Connect host seq_start to CPU start
     assign cpu_start = host_seq_start;
