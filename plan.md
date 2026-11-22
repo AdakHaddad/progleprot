@@ -38,20 +38,21 @@ Open-source, standalone protocol emulator ASIC: a tiny CPU + hardware timer/pin 
 
 ## Milestones
 
-| # | Milestone | Deliverable | Est. Cells |
-|---|-----------|-------------|------------|
-| M0 | ISA spec, area budget, toolchain | `isa.md`, `area_budget.xlsx`, GCC config | — |
-| M1 | Minimal CPU core (fetch/decode/exec) | `cpu_core.v`, tests | 3K |
-| M2 | Timer coprocessor (8× NCO + counter + events) | `timer_coproc.v`, tests | 4K |
-| M3 | Pin matrix (8×8 crossbar + dir/out/in) | `pin_matrix.v`, tests | 1K |
-| M4 | Host interface (SPI slave loader) | `host_if.v`, tests | 1K |
-| M5 | Program memory (dual-bank 4KB + boot ROM) | `prog_mem.v`, tests | 2K |
-| M6 | **Integration: CPU + Timers + Pins + Host** | `emu_top.v`, simulation | 12K |
-| M7 | **Firmware: UART TX/RX @ 3Mbps** | `firmware/uart.s`, sim + HW test | — |
-| M8 | **Firmware: SPI Master/Slave @ 25MHz** | `firmware/spi.s`, sim + HW test | — |
-| M9 | **Firmware: I2C Master @ 1MHz** | `firmware/i2c.s`, sim + HW test | — |
-| M10 | Synthesis/P&R, timing closure, TT submission | GDS, reports | 25K |
-| M11 | Stretch: CAN, USB-LS, Manchester, Capture | `firmware/*.s`, HW assist blocks | +3K |
+| # | Milestone | Deliverable | Est. Cells | Status |
+|---|-----------|-------------|------------|--------|
+| M0 | ISA spec, area budget, toolchain | `isa.md`, `area_budget.xlsx`, GCC config | — | ✅ |
+| M1 | Minimal CPU core (fetch/decode/exec) | `cpu_core.v`, tests | 3K | ✅ |
+| M2 | Timer coprocessor (8× NCO + counter + events) | `timer_coproc.v`, tests | 4K | ✅ |
+| M3 | Pin matrix (8×8 crossbar + dir/out/in) | `pin_matrix.v`, tests | 1K | ✅ |
+| M4 | Host interface (SPI slave loader) | `host_if.v`, tests | 1K | ✅ |
+| M5 | Program memory (dual-bank 4KB + boot ROM) | `prog_mem.v`, tests | 2K | ✅ |
+| M6 | **Integration: CPU + Timers + Pins + Host** | `emu_top.v`, simulation | 12K | ✅ |
+| M7 | **Firmware: UART TX/RX @ 3Mbps** | `firmware/uart.s`, sim + HW test | — | ✅ |
+| M8 | **Firmware: SPI Master/Slave @ 25MHz** | `firmware/spi.s`, sim + HW test | — | ✅ |
+| M9 | **Firmware: I2C Master @ 1MHz** | `firmware/i2c.s`, sim + HW test | — | ✅ |
+| M10 | **Branch Instructions (BEQZ, BNEZ, BLTZ, BGEZ, JAL, JALR)** | `cpu_core.v` updated, `isa.md` | — | ✅ |
+| M11 | Synthesis/P&R, timing closure, TT submission | GDS, reports | 25K | ⏳ |
+| M12 | Stretch: CAN, USB-LS, Manchester, Capture | `firmware/*.s`, HW assist blocks | +3K | ⏳ |
 
 ## Area Budget (Target: ≤32K cells)
 
@@ -74,15 +75,23 @@ Open-source, standalone protocol emulator ASIC: a tiny CPU + hardware timer/pin 
 | Class | Instructions | Encoding |
 |-------|--------------|----------|
 | ALU | ADD, SUB, AND, OR, XOR, SLT, SLL, SRL, SRA | R-type |
-| Immediate | ADDI, ANDI, ORI, XORI, LUI | I-type |
-| Memory | LOAD, STORE (8/16-bit) | I-type |
-| Control | BEQ, BNE, BLT, BGE, JAL, JALR, RET | B/J-type |
+| Immediate | ADDI, ORI | I-type |
+| Branch | BEQZ, BNEZ, BLTZ, BGEZ, JAL | B/J-type |
+| Jump Register | JALR (custom funct 0xC) | Custom |
 | **Timing (Custom)** | **OUT pin, rs1** — drive pin from reg | Custom |
 | | **WAIT timer, rs1** — stall cycles | Custom |
 | | **WAITE timer, rs1** — stall until pin event | Custom |
 | | **TIME rd, timer** — read timer/capture | Custom |
+| | **TCFG timer, config** — configure timer | Custom |
+| | **TUNING timer, val** — set NCO tuning | Custom |
+| | **PINSEL pin, src** — select pin source | Custom |
+| | **EVEN timer, mask** — enable events | Custom |
+| | **SWAP** — trigger bank swap | Custom |
+| | **VERIFY rd** — read host CRC | Custom |
+| | **CAPRD rd, timer** — read capture | Custom |
+| | **HALT** — stop CPU | Custom |
 
-Base ISA ≈ RV32E compressed to 16-bit. 4 custom instructions for pin/timer control.
+Base ISA ≈ RV32E compressed to 16-bit. 5 branch + 12 custom timing instructions.
 
 ## Firmware Library (Target Sizes)
 
@@ -133,9 +142,12 @@ Base ISA ≈ RV32E compressed to 16-bit. 4 custom instructions for pin/timer con
 - [ ] GDS exported per TT format
 
 ## Next Immediate Steps
-1. Write `isa.md` with full instruction encoding
-2. Write `area_budget.xlsx` with per-block breakdown
-3. Implement `cpu_core.v` (M1) — fetch/decode/execute
-4. Implement `timer_coproc.v` (M2) — NCO + counter + events
-5. Implement `pin_matrix.v` (M3) — crossbar + config
-6. Run synthesis after each block to track area
+1. ~~Write `isa.md` with full instruction encoding~~ ✅
+2. ~~Write `area_budget.xlsx` with per-block breakdown~~ ✅
+3. ~~Implement `cpu_core.v` (M1) — fetch/decode/execute~~ ✅
+4. ~~Implement `timer_coproc.v` (M2) — NCO + counter + events~~ ✅
+4. ~~Implement `pin_matrix.v` (M3) — crossbar + config~~ ✅
+5. Run synthesis after each block to track area
+6. IHP SRAM macro integration for program memory
+7. Gate-level simulation with SDF
+8. DRC/LVS verification

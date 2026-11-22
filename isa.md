@@ -13,6 +13,11 @@
 ├──────┼──────┼──────┼──────┼────────────────────────────────┤
 │ OP   │ rd   │ rs1  │ rs2  │ ALU ops (ADD, SUB, etc.)       │
 │ 0x8  │ rd   │ imm8 │      │ Immediate ops (ADDI, ORI)      │
+│ 0xA  │ rs1  │ off8 │      │ Branch if zero (BEQZ)          │
+│ 0xB  │ rs1  │ off8 │      │ Branch if not zero (BNEZ)      │
+│ 0xC  │ rs1  │ off8 │      │ Branch if < 0 (BLTZ)           │
+│ 0xD  │ rs1  │ off8 │      │ Branch if >= 0 (BGEZ)          │
+│ 0xE  │ rd   │ off8 │      │ Jump and Link (JAL)            │
 │ 0xF  │ funct│ rs1  │ rs2  │ Custom timing instructions     │
 └──────┴──────┴──────┴──────┴────────────────────────────────┘
 ```
@@ -24,8 +29,12 @@
 | 0x0    | ALU      | R-type | ALU operations (see funct) |
 | 0x8    | ADDI     | I-type | Add sign-extended immediate |
 | 0x9    | ORI      | I-type | OR zero-extended immediate |
+| 0xA    | BEQZ     | B-type | Branch if rs1 == 0 |
+| 0xB    | BNEZ     | B-type | Branch if rs1 != 0 |
+| 0xC    | BLTZ     | B-type | Branch if rs1 < 0 (signed) |
+| 0xD    | BGEZ     | B-type | Branch if rs1 >= 0 (signed) |
+| 0xE    | JAL      | J-type | Jump and Link (rd = PC+2, PC += offset) |
 | 0xC    | MEM      | I-type | Memory ops (LOAD/STORE) - TBD |
-| 0xE    | BRANCH   | B-type | Branch ops (BEQ, BNE, etc.) - TBD |
 | 0xF    | CUSTOM   | Custom | Timing/peripheral instructions |
 
 ## ALU Funct Codes (opcode 0x0)
@@ -47,7 +56,21 @@
 | Opcode | Mnemonic | Format | Operation |
 |--------|----------|--------|-----------|
 | 0x8    | ADDI     | rd, imm8 | rd = 0 + sign_ext(imm8) |
-| 0x9    | ORI      | rd, imm8 | rd = 0 | zero_ext(imm8) |
+| 0x9    | ORI      | rd, imm8 | rd = 0 \| zero_ext(imm8) |
+
+## Branch Instructions
+
+| Opcode | Mnemonic | Format | Operation |
+|--------|----------|--------|-----------|
+| 0xA    | BEQZ     | rs1, offset8 | if (rs1 == 0) PC += sign_ext(offset8)<<1 |
+| 0xB    | BNEZ     | rs1, offset8 | if (rs1 != 0) PC += sign_ext(offset8)<<1 |
+| 0xC    | BLTZ     | rs1, offset8 | if (rs1 < 0) PC += sign_ext(offset8)<<1 |
+| 0xD    | BGEZ     | rs1, offset8 | if (rs1 >= 0) PC += sign_ext(offset8)<<1 |
+| 0xE    | JAL      | rd, offset8 | rd = PC+2; PC += sign_ext(offset8)<<1 |
+
+- **Branch Offset**: 8-bit signed immediate, shifted left by 1 (2-byte aligned)
+- **Range**: -256 to +254 bytes (-128 to +127 instructions)
+- **Evaluated in ID stage** for single-cycle branch resolution
 
 ## Custom Timing Instructions (opcode 0xF)
 
@@ -67,6 +90,7 @@ Format: `[15:12]=0xF, [11:8]=funct, [7:4]=rs1, [3:0]=rs2/rd`
 | 0x9   | SWAP     | - | Trigger program bank swap |
 | 0xA   | VERIFY   | rd | Read host CRC → rd |
 | 0xB   | CAPRD    | rd, timer | Read capture register → rd |
+| 0xC   | JALR     | rd, rs1 | rd = PC+2; PC = rs1 (register indirect jump) |
 | 0xF   | HALT     | - | Stop CPU execution |
 
 ### Custom Instruction Details
@@ -112,6 +136,11 @@ Format: `[15:12]=0xF, [11:8]=funct, [7:4]=rs1, [3:0]=rs2/rd`
 - `src = rs2[3:0]` (0=CPU, 1-8=Timer0-7)
 - Writes to pin matrix REG_SEL (pins 0-3) or REG_SEL_H (pins 4-7)
 - Value shifted by `pin * 4` bits
+
+**JALR rd, rs1**
+- `rd = if_instr[3:0]` (destination register)
+- `rs1 = if_instr[7:4]` (register with jump target)
+- `rd = PC+2; PC = regs[rs1]`
 
 ## Memory Map
 
@@ -187,7 +216,7 @@ Format: `[15:12]=0xF, [11:8]=funct, [7:4]=rs1, [3:0]=rs2/rd`
 4-stage: IF → ID → EX → WB
 
 - **IF**: Fetch instruction from program memory (PC is byte address)
-- **ID**: Decode, register read with forwarding, ALU compute
+- **ID**: Decode, register read with forwarding, ALU compute, branch evaluation
 - **EX**: Memory/peripheral access, wait counter decrement
 - **WB**: Register writeback
 
@@ -195,6 +224,12 @@ Format: `[15:12]=0xF, [11:8]=funct, [7:4]=rs1, [3:0]=rs2/rd`
 - EX → ID: ALU result
 - WB → ID: Writeback data
 - ID → ID: Computed ALU result for next instruction
+
+### Branch Resolution
+- Conditional branches (BEQZ, BNEZ, BLTZ, BGEZ) evaluated in ID stage
+- JAL always taken, target computed in ID
+- JALR (custom) evaluated in ID stage
+- No branch delay slots - taken branches redirect IF immediately
 
 ## Register File
 

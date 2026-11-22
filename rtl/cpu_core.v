@@ -7,6 +7,7 @@
  * ISA Encoding (16-bit):
  *   OP_ALU  (0x0): [15:12]=0, [11:8]=rd, [7:4]=rs1, [3:0]=rs2  (ADD only for now)
  *   OP_IMM  (0x8): [15:12]=8, [11:8]=rd, [7:0]=imm8 (sign-ext), rs1=x0
+ *   OP_BRANCH (0xA-0xE): Branch/jump instructions
  *   OP_CUSTOM(0xF): [15:12]=F, [11:8]=funct, [7:4]=rs1, [3:0]=rs2/rd
  */
 module cpu_core #(
@@ -52,6 +53,13 @@ module cpu_core #(
     localparam OP_BRANCH   = 4'hE;  // Branch ops (not fully implemented)
     localparam OP_CUSTOM   = 4'hF;  // Custom timing instructions
 
+    // Branch opcodes (new)
+    localparam OP_BEQZ     = 4'hA;  // Branch if rs1 == 0
+    localparam OP_BNEZ     = 4'hB;  // Branch if rs1 != 0
+    localparam OP_BLTZ     = 4'hC;  // Branch if rs1 < 0 (signed)
+    localparam OP_BGEZ     = 4'hD;  // Branch if rs1 >= 0 (signed)
+    localparam OP_JAL      = 4'hE;  // Jump and Link (rd = PC+2, PC += offset)
+
     // Custom timing instruction funct codes (for OP_CUSTOM)
     localparam FUNCT_OUT    = 4'h0;  // OUT pin, rs1 (pin in rs1[3:0], val in rs1[15:4]?)
     localparam FUNCT_DIR    = 4'h1;  // DIR pin, rs1
@@ -62,6 +70,7 @@ module cpu_core #(
     localparam FUNCT_TUNING  = 4'h6;  // TUNING timer, rs1, rs2
     localparam FUNCT_PINSEL = 4'h7;  // PINSEL pin, rs1
     localparam FUNCT_EVEN   = 4'h8;  // EVEN timer, rs1
+    localparam FUNCT_JALR   = 4'hC;  // JALR rd, rs1 (register indirect jump)
     localparam FUNCT_SWAP   = 4'h9;  // SWAP (trigger bank swap)
     localparam FUNCT_VERIFY = 4'hA;  // VERIFY rd (read CRC)
     localparam FUNCT_CAPRD  = 4'hB;  // CAPRD rd, timer
@@ -109,6 +118,9 @@ module cpu_core #(
     reg              id_is_halt;
     reg              id_is_wait;     // WAIT instruction flag
     reg [15:0]       id_wait_cycles; // cycles to wait
+    reg              id_is_jal;      // JAL instruction flag
+    reg [3:0]        id_jal_rd;      // JAL destination register
+    reg [15:0]       id_jal_target;  // JAL target PC
 
     // EX stage - pipeline registers
     reg [15:0]       ex_alu_result;
@@ -123,6 +135,9 @@ module cpu_core #(
     reg [15:0]       ex_rs1_val, ex_rs2_val;
     reg [ADDR_W-1:0] ex_pc;
     reg              ex_is_halt;
+    reg              ex_is_branch;
+    reg [ADDR_W-1:0] ex_branch_target;
+    reg              ex_branch_taken;
     reg              ex_is_wait;
     reg [15:0]       ex_wait_cnt;
 
@@ -131,6 +146,8 @@ module cpu_core #(
     reg [3:0]        wb_rd;
     reg              wb_reg_write;
     reg              wb_is_halt;
+    reg              wb_is_jal;
+    reg [3:0]        wb_jal_rd;
 
     // Register file - initialized to 0
     reg [15:0] regs [0:15];
@@ -148,6 +165,10 @@ module cpu_core #(
     reg [15:0] write_data;  // WB stage write data
     reg [15:0] wait_cycles;
     reg        wait_stall;
+    reg        branch_cond;
+    reg [ADDR_W-1:0] branch_target;
+    reg [15:0]       branch_offset;
+    reg              is_branch_instr;
 
     // ALU function
     function [15:0] alu_op;
@@ -166,6 +187,15 @@ module cpu_core #(
                 4'h8: alu_op = $signed(a) >>> b[3:0];  // SRA
                 default: alu_op = 16'h0000;
             endcase
+        end
+    endfunction
+
+    // Branch offset sign-extension function
+    function [15:0] sign_extend_offset8;
+        input [7:0] offset8;
+        begin
+            // Sign-extend 8-bit offset and shift left by 1 (2-byte aligned)
+            sign_extend_offset8 = {{7{offset8[7]}}, offset8, 1'b0};
         end
     endfunction
 
@@ -201,8 +231,13 @@ module cpu_core #(
                     pipe_st <= S_ID;
                 end
                 S_ID: begin
-                    if (id_stall || wait_stall) pipe_st <= S_STALL;
-                    else pipe_st <= S_EX;
+                    if (is_branch_instr && branch_cond) begin
+                        pipe_st <= S_IF;  // Branch taken - redirect IF
+                    end else if (id_stall || wait_stall) begin
+                        pipe_st <= S_STALL;
+                    end else begin
+                        pipe_st <= S_EX;
+                    end
                 end
                 S_STALL: begin
                     if (ex_is_wait && ex_wait_cnt > 0) pipe_st <= S_STALL;
@@ -215,8 +250,13 @@ module cpu_core #(
     end
 
     // IF: Fetch instruction - PC is byte address, prog_addr is word address
+    // Branch taken in ID stage overrides PC
     always @(*) begin
-        pc_next = pc + 2; // 16-bit instructions = 2 bytes
+        if (is_branch_instr && branch_cond) begin
+            pc_next = branch_target;
+        end else begin
+            pc_next = pc + 2; // 16-bit instructions = 2 bytes
+        end
     end
 
     // Convert byte address (PC) to word address for program memory
@@ -247,9 +287,27 @@ module cpu_core #(
             id_is_halt <= 0;
             id_is_wait <= 0;
             id_wait_cycles <= 0;
+            id_is_jal <= 0;
+            id_jal_rd <= 0;
+            id_jal_target <= 0;
+            is_branch_instr <= 0;
+            branch_cond <= 0;
+            branch_target <= 0;
+            branch_offset <= 0;
         end else if (cpu_running && pipe_st == S_ID) begin
             id_instr <= if_instr;
             id_pc <= pc;
+
+            // Reset branch defaults
+            id_branch_taken <= 0;
+            id_branch_target <= 0;
+            id_is_jal <= 0;
+            id_jal_rd <= 0;
+            id_jal_target <= 0;
+            is_branch_instr <= 0;
+            branch_cond <= 0;
+            branch_target <= 0;
+            branch_offset <= 0;
 
             // Default values
             id_reg_write <= 0;
@@ -279,6 +337,46 @@ module cpu_core #(
                     dec_rs2  = 4'd0;
                     id_imm8  <= if_instr[7:0];
                     id_funct <= 4'h0; // ADDI
+                end
+                // Branch instructions (opcodes 0xA-0xE)
+                OP_BEQZ: begin  // BEQZ rs1, offset8
+                    dec_rd   = 4'd0;
+                    dec_rs1  = if_instr[11:8];
+                    dec_rs2  = 4'd0;
+                    branch_offset <= sign_extend_offset8(if_instr[7:0]);
+                    is_branch_instr <= 1;
+                end
+                OP_BNEZ: begin  // BNEZ rs1, offset8
+                    dec_rd   = 4'd0;
+                    dec_rs1  = if_instr[11:8];
+                    dec_rs2  = 4'd0;
+                    branch_offset <= sign_extend_offset8(if_instr[7:0]);
+                    is_branch_instr <= 1;
+                end
+                OP_BLTZ: begin  // BLTZ rs1, offset8
+                    dec_rd   = 4'd0;
+                    dec_rs1  = if_instr[11:8];
+                    dec_rs2  = 4'd0;
+                    branch_offset <= sign_extend_offset8(if_instr[7:0]);
+                    is_branch_instr <= 1;
+                end
+                OP_BGEZ: begin  // BGEZ rs1, offset8
+                    dec_rd   = 4'd0;
+                    dec_rs1  = if_instr[11:8];
+                    dec_rs2  = 4'd0;
+                    branch_offset <= sign_extend_offset8(if_instr[7:0]);
+                    is_branch_instr <= 1;
+                end
+                OP_JAL: begin   // JAL rd, offset8
+                    dec_rd   = if_instr[11:8];
+                    dec_rs1  = 4'd0;
+                    dec_rs2  = 4'd0;
+                    id_is_jal <= 1;
+                    id_jal_rd <= if_instr[11:8];
+                    branch_offset <= sign_extend_offset8(if_instr[7:0]);
+                    id_jal_target <= pc + 2 + sign_extend_offset8(if_instr[7:0]);
+                    is_branch_instr <= 1;  // JAL always taken
+                    branch_cond <= 1;
                 end
                 OP_CUSTOM: begin
                     dec_rd   = if_instr[3:0];
@@ -326,6 +424,22 @@ module cpu_core #(
             id_imm12 <= if_instr[11:0];
             id_off8  <= if_instr[7:0];
 
+            // Evaluate branch conditions for conditional branches
+            case (if_instr[15:12])
+                OP_BEQZ: branch_cond <= (rs1_val == 16'h0000);
+                OP_BNEZ: branch_cond <= (rs1_val != 16'h0000);
+                OP_BLTZ: branch_cond <= (rs1_val[15] == 1'b1);  // MSB = sign bit
+                OP_BGEZ: branch_cond <= (rs1_val[15] == 1'b0);  // MSB = sign bit
+                default: branch_cond <= 0;
+            endcase
+
+            // Calculate branch target for taken branches
+            if (is_branch_instr && branch_cond) begin
+                branch_target <= pc + branch_offset;
+                id_branch_taken <= 1;
+                id_branch_target <= pc + branch_offset;
+            end
+
             // Now handle custom instructions using the computed rs1_val/rs2_val
             if (if_instr[15:12] == OP_CUSTOM) begin
                 // Check for WAIT instruction
@@ -334,6 +448,21 @@ module cpu_core #(
                     wait_cycles = rs2_val;  // rs2 has wait cycles
                     wait_stall = (rs2_val != 0);
                     id_wait_cycles <= rs2_val;
+                end
+
+                // Check for JALR instruction (register indirect jump)
+                if (if_instr[11:8] == FUNCT_JALR) begin
+                    is_branch_instr <= 1;
+                    branch_cond <= 1;
+                    branch_target <= rs1_val;  // Jump to address in rs1
+                    id_branch_taken <= 1;
+                    id_branch_target <= rs1_val;
+                    id_is_jal <= 1;
+                    id_jal_rd <= if_instr[3:0];  // rd in [3:0]
+                    id_jal_target <= rs1_val;
+                    // Return address = PC+2
+                    id_alu_result <= pc + 2;
+                    id_reg_write <= 1;
                 end
 
                 id_is_custom <= 1;
@@ -397,6 +526,16 @@ module cpu_core #(
                     // Override rs2_val for immediate
                     id_rs2_val <= imm8_sext;
                 end
+                // Branch instructions - target computed in ID
+                OP_BEQZ, OP_BNEZ, OP_BLTZ, OP_BGEZ: begin
+                    // Branch target already computed, condition evaluated
+                    // No register write for conditional branches
+                end
+                OP_JAL: begin
+                    // JAL: rd = PC+2, PC = target
+                    id_alu_result <= pc + 2;  // Return address
+                    id_reg_write <= 1;
+                end
                 OP_CUSTOM: begin
                     // Custom instruction ALU result handled in WB
                     if (id_is_wait) begin
@@ -425,11 +564,16 @@ module cpu_core #(
             ex_rs1_val <= 0; ex_rs2_val <= 0;
             ex_pc <= 0;
             ex_is_halt <= 0;
+            ex_is_branch <= 0;
+            ex_branch_target <= 0;
+            ex_branch_taken <= 0;
             ex_is_wait <= 0;
             ex_wait_cnt <= 0;
         end else if (cpu_running && (pipe_st == S_EX || pipe_st == S_STALL)) begin
-            // Load new instruction from ID when entering EX or STALL from ID
-            if (pipe_st == S_EX || (pipe_st == S_STALL && ex_wait_cnt == 0 && !ex_is_wait)) begin
+            // Load new instruction from ID when:
+            // 1. Normal EX stage (pipe_st == S_EX)
+            // 2. WAIT completing in STALL (ex_wait_cnt == 1, about to go to WB)
+            if (pipe_st == S_EX || (pipe_st == S_STALL && ex_is_wait && ex_wait_cnt == 1)) begin
                 ex_rd <= id_rd;
                 ex_reg_write <= id_reg_write;
                 ex_mem_read <= id_mem_read;
@@ -444,6 +588,9 @@ module cpu_core #(
                 ex_rs2_val <= id_rs2_val;
                 ex_pc <= id_pc;
                 ex_is_halt <= id_is_halt;
+                ex_is_branch <= id_branch_taken;
+                ex_branch_target <= id_branch_target;
+                ex_branch_taken <= id_branch_taken;
                 ex_is_wait <= id_is_wait;
                 ex_wait_cnt <= id_wait_cycles;
             end
@@ -465,10 +612,14 @@ module cpu_core #(
             wb_rd <= 0;
             wb_reg_write <= 0;
             wb_is_halt <= 0;
+            wb_is_jal <= 0;
+            wb_jal_rd <= 0;
         end else if (cpu_running && pipe_st == S_WB) begin
             wb_rd <= ex_rd;
             wb_reg_write <= ex_reg_write;
             wb_is_halt <= ex_is_halt;
+            wb_is_jal <= ex_is_branch && (ex_rd == ex_rd);  // Track JAL/JALR
+            wb_jal_rd <= ex_rd;
 
             // Compute write data using blocking assignment so regs[ex_rd] sees new value
             if (ex_is_custom) begin
@@ -494,6 +645,10 @@ module cpu_core #(
                 write_data = ex_alu_result;
             end
 
+            // Handle JAL/JALR return address write
+            // For JAL/JALR, ex_alu_result already has PC+2 from ID stage
+            // The register write happens via wb_reg_write path above
+
             wb_data <= write_data;
 
             // Write register file with write_data
@@ -515,11 +670,6 @@ module cpu_core #(
     assign host_wr_en = (cpu_running && pipe_st == S_EX) && ex_mem_write && (ex_mem_addr >= HOST_BASE);
     assign host_wr_addr = ex_mem_addr[3:0];
     assign host_wr_data = ex_mem_wdata;
-
-    // Branch handling (simplified - not fully implemented yet)
-    always @(*) begin
-        pc_next = pc + 2;
-    end
 
     // Outputs
     assign cpu_done = !cpu_running && (pipe_st == S_IF || wb_is_halt);
