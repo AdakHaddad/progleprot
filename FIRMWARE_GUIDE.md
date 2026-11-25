@@ -12,9 +12,9 @@ Firmware = Assembly code (`.s`) → Assembled to binary (`.bin`) → Loaded via 
 
 | Tool | File | Purpose |
 |------|------|---------|
-| Assembler | `scripts/asm.py` | `.s` → `.bin` (raw 16-bit words) |
+| Assembler | `scripts/asm.py` | `.s` → `.bin` (raw 16-bit words, big-endian) |
 | UART Loader | `scripts/uart_load_firmware.py` | Load `.bin` via USB-UART (Basys3) |
-| SPI Loader | (host_if protocol) | Load `.bin` via SPI (ASIC) |
+| SPI Loader | `host_if` protocol | Load `.bin` via SPI (ASIC) |
 
 ```bash
 # Assemble
@@ -35,53 +35,98 @@ python3 scripts/uart_load_firmware.py --port /dev/ttyUSB0 --firmware firmware/my
 ; Comments start with ;
 ; Labels end with :
 
-; Registers: r0-r15 (r0 = zero, r15 = stack pointer convention)
+; Registers: x0-x15 (x0 = zero, x15 = stack pointer convention)
 ; Immediates: decimal, 0xHEX, 0bBINARY
 
 ; ALU (3-operand)
-ADD  r1, r2, r3      ; r1 = r2 + r3
-SUB  r1, r2, r3      ; r1 = r2 - r3
-AND  r1, r2, r3
-OR   r1, r2, r3
-XOR  r1, r2, r3
-SHL  r1, r2, r3      ; r1 = r2 << r3
-SHR  r1, r2, r3      ; r1 = r2 >> r3
+ADD  x1, x2, x3      ; x1 = x2 + x3
+SUB  x1, x2, x3      ; x1 = x2 - x3
+AND  x1, x2, x3
+OR   x1, x2, x3
+XOR  x1, x2, x3
+SLL  x1, x2, x3      ; x1 = x2 << x3[3:0]
+SRL  x1, x2, x3      ; x1 = x2 >> x3[3:0]
+SRA  x1, x2, x3      ; x1 = $signed(x2) >>> x3[3:0]
+SLT  x1, x2, x3      ; x1 = (x2 < x3) ? 1 : 0 (signed)
 
 ; ALU immediate (8-bit sign-extended)
-ADDI r1, r2, 0x29    ; r1 = r2 + 0x29
-SUBI r1, r2, -10
-ANDI r1, r2, 0xFF
-ORI  r1, r2, 0x0F
+ADDI x1, x2, 0x29    ; x1 = x2 + 0x29
+SUBI x1, x2, -10
+ANDI x1, x2, 0xFF
+ORI  x1, x2, 0x0F
+XORI x1, x2, 0x55
+SHLI x1, x2, 4       ; x1 = x2 << 4
+SHRI x1, x2, 2       ; x1 = x2 >> 2
 
 ; Branch (8-bit signed offset = ±127 instructions)
-BEQZ r1, label       ; if r1==0 jump
-BNEZ r1, label       ; if r1!=0 jump
-BLTZ r1, label       ; if r1<0 jump
-BGEZ r1, label       ; if r1>=0 jump
-JAL  r1, label       ; jump and link (r1 = return addr)
-JALR r1, r2          ; jump register (r1 = ret, pc = r2)
+BEQZ x1, label       ; if x1==0 jump
+BNEZ x1, label       ; if x1!=0 jump
+BLTZ x1, label       ; if x1<0 jump
+BGEZ x1, label       ; if x1>=0 jump
+JAL  x1, label       ; jump and link (x1 = return addr)
+JALR x1, x2          ; jump register (x1 = ret, pc = x2)
 
-; Memory (not implemented yet - use memory-mapped I/O)
-; LOAD r1, [addr]
-; STORE r1, [addr]
+; Pseudo-ops (assembler expands)
+LDI  x1, 0xABCD      ; Load immediate → ADDI x1, x0, imm
+JMP  label           ; JAL x0, label
+CALL label           ; JAL x14, label
+RET                  ; JALR x0, x14
+NOP                  ; ADD x0, x0, x0
 
 ; Custom timing/peripheral instructions (opcode 0xF)
-OUT   r0, r1         ; Drive pin[r0] = r1[0]
-DIR   r0, r1         ; Pin[r0] direction = r1[0] (1=out, 0=in)
-WAIT  r0, r1         ; Stall CPU for r1 cycles (uses timer r0)
-WAITE r0, r1         ; Stall until timer r0 event mask r1
-PINSEL r0, r1        ; Pin[r0] source = r1 (0=CPU, 1-8=Timer0-7)
-TCFG  r0, r1         ; Timer[r0] mode = r1
-TUNING r0, r1        ; Timer[r0] NCO tuning = r1 (24-bit across regs)
-EVEN  r0, r1         ; Timer[r0] event enable = r1
-TIME  r0, r1         ; Read timer[r0] counter → r1
-CAPRD r0, r1         ; Read timer[r0] capture → r1
+OUT   pin, val       ; Drive pin_out[pin] = val[0], pin_oe[pin]=1
+DIR   pin, dir       ; Pin[pin] direction = dir[0] (1=out, 0=in)
+WAIT  timer, cycles  ; Stall CPU for cycles (uses timer counter)
+WAITE timer, event   ; Stall until timer event (1=rise, 2=fall, 4=capture)
+PINSEL pin, source   ; Pin source: 0=CPU, 1=Timer0..8=Timer7
+TCFG  timer, mode    ; Timer mode (see modes below)
+TUNING timer, val    ; Timer NCO tuning (24-bit across regs)
+EVEN  timer, mask    ; Timer event enable mask
+TIME  rd, timer      ; Read timer counter → rd
+CAPRD rd, timer      ; Read timer capture FIFO → rd
+SWAP                 ; Atomic bank swap (staging → active)
+VERIFY rd            ; rd = CRC32 of staging bank
 HALT                 ; Stop CPU
 
-; Pseudo-ops
+; Directives
 .org 0x0000          ; Set assembly address
-.word 0x1234         ; Raw 16-bit word
-ldi  r1, 0xABCD      ; Load immediate (assembler expands to ADDI)
+.word 0x1234         ; Raw 16-bit word (big-endian in .bin)
+```
+
+### Timer Modes (for TCFG)
+
+```assembly
+; Mode constants
+.equ MODE_OFF       = 0x00
+.equ MODE_COUNT_UP  = 0x01
+.equ MODE_COUNT_DN  = 0x02
+.equ MODE_NCO_CLK   = 0x03    ; 50% duty NCO clock output
+.equ MODE_NCO_VAR   = 0x04    ; Variable duty (uses COMPARE)
+.equ MODE_PWM       = 0x05    ; PWM (COMPARE = duty)
+.equ MODE_CAPTURE   = 0x08    ; Input capture on edge
+.equ MODE_MEASURE   = 0x10    ; Period/pulse measurement
+```
+
+### Pin Sources (for PINSEL)
+
+```assembly
+.equ SRC_CPU     = 0x0
+.equ SRC_TIMER0  = 0x1
+.equ SRC_TIMER1  = 0x2
+.equ SRC_TIMER2  = 0x3
+.equ SRC_TIMER3  = 0x4
+.equ SRC_TIMER4  = 0x5
+.equ SRC_TIMER5  = 0x6
+.equ SRC_TIMER6  = 0x7
+.equ SRC_TIMER7  = 0x8
+```
+
+### WAITE Event Masks
+
+```assembly
+.equ EV_RISE   = 0x1    ; Rising edge
+.equ EV_FALL   = 0x2    ; Falling edge
+.equ EV_CAPT   = 0x4    ; Capture complete
 ```
 
 ---
@@ -90,503 +135,411 @@ ldi  r1, 0xABCD      ; Load immediate (assembler expands to ADDI)
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| 0x0000-0x0FFF | Program RAM | R (fetch) | Your firmware (2048×16) |
-| 0x1000-0x17FF | Boot ROM | R | Factory firmware |
-| 0xF000-0xF00F | Timer 0 | RW | 16 bytes |
-| 0xF010-0xF01F | Timer 1 | RW | 16 bytes |
-| 0xF020-0xF02F | Timer 2 | RW | 16 bytes |
-| 0xF030-0xF03F | Timer 3 | RW | 16 bytes |
-| 0xF040-0xF04F | Timer 4 | RW | 16 bytes |
-| 0xF050-0xF05F | Timer 5 | RW | 16 bytes |
-| 0xF060-0xF06F | Timer 6 | RW | 16 bytes |
-| 0xF070-0xF07F | Timer 7 | RW | 16 bytes |
-| 0xF100 | Pin DIR | RW | 8 bits (1=out) |
-| 0xF101 | Pin SEL[3:0] | RW | 4×4 bits (pins 0-3) |
-| 0xF102 | Pin SEL[7:4] | RW | 4×4 bits (pins 4-7) |
-| 0xF103 | Pin PULL | RW | 8×2 bits |
-| 0xF104 | Pin OUT | RW | 8 bits (CPU drive) |
-| 0xF105 | Pin IN | R | 8 bits (read) |
-| 0xF106 | Pin OE | RW | 8 bits (output enable) |
+| 0x0000-0x07FF | Program RAM (Bank A) | R (fetch) | Active firmware (2048×16) |
+| 0x0800-0x0FFF | Program RAM (Bank B) | R/W | Staging bank (ASIC only) |
+| 0x1000-0x11FF | Boot ROM | R | Factory firmware (512×16) |
+| 0xF000-0xF00F | Timer 0 | RW | Timer 0 registers |
+| 0xF010-0xF01F | Timer 1 | RW | Timer 1 registers |
+| 0xF020-0xF02F | Timer 2 | RW | Timer 2 registers |
+| 0xF030-0xF03F | Timer 3 | RW | Timer 3 registers |
+| 0xF040-0xF04F | Timer 4 | RW | Timer 4 registers |
+| 0xF050-0xF05F | Timer 5 | RW | Timer 5 registers |
+| 0xF060-0xF06F | Timer 6 | RW | Timer 6 registers |
+| 0xF070-0xF07F | Timer 7 | RW | Timer 7 registers |
+| 0xF100-0xF10F | Pin Matrix | RW | Pin configuration |
+| 0xF200-0xF207 | Host Interface | R | Status, CRC, version |
 
-### Timer Register Map (per timer, base = 0xF000 + timer×16)
+### Timer Register Offsets (per timer, 16 bytes)
 
-| Offset | Name | Bits | Description |
-|--------|------|------|-------------|
-| +0x0 | TUNING[7:0] | RW | NCO phase increment byte 0 |
-| +0x1 | TUNING[15:8] | RW | NCO phase increment byte 1 |
-| +0x2 | TUNING[23:16] | RW | NCO phase increment byte 2 |
-| +0x3 | Reserved | - | |
-| +0x4 | COMPARE | RW | Compare value |
-| +0x5 | MODE | RW | Timer mode (0-7) |
-| +0x6 | EVEN | RW | Event enables |
-| +0x7 | EV_ST | R | Event status (read clears) |
+| Offset | Register | Description |
+|--------|----------|-------------|
+| 0x0 | NCO_INC_LOW | NCO tuning [7:0] |
+| 0x1 | NCO_INC_MID | NCO tuning [15:8] |
+| 0x2 | NCO_INC_HIGH | NCO tuning [23:16] |
+| 0x3 | CONFIG | Mode, enable, polarity |
+| 0x4 | COMPARE | Compare value |
+| 0x5 | COUNTER | Counter value |
+| 0x6 | CAPTURE | Capture FIFO read |
+| 0x7 | EVENTS | Event status/clear |
 
-### Timer Modes (MODE register)
+### Pin Matrix Registers
 
-| Value | Mode | Description |
-|-------|------|-------------|
-| 0x0 | OFF | Disabled |
-| 0x1 | COUNT_UP | Increment every cycle |
-| 0x2 | COUNT_DOWN | Decrement, event at 0 |
-| 0x3 | NCO_CLK | Output NCO MSB as 50% clock |
-| 0x4 | NCO_VAR | Variable duty (counter vs compare) |
-| 0x5 | PWM | PWM output (counter < compare) |
-| 0x6 | CAPTURE | Latch counter on pin event |
-| 0x7 | MEASURE | Pulse width / period measurement |
+| Addr | Register | Bits | Description |
+|------|----------|------|-------------|
+| 0xF100 | DIR | [7:0] | Pin directions (1=out) |
+| 0xF101 | OUT | [7:0] | CPU pin output values |
+| 0xF102 | IN | [7:0] | Pin input values (read-only) |
+| 0xF103 | OE | [7:0] | Output enables |
+| 0xF104 | SEL_LO | [15:0] | Pins 0-3 source (4 bits each) |
+| 0xF105 | SEL_HI | [15:0] | Pins 4-7 source (4 bits each) |
+| 0xF106 | PULL | [15:0] | Pull config (2 bits per pin) |
+| 0xF107 | RISE | [7:0] | Rising edge detect |
+| 0xF108 | FALL | [7:0] | Falling edge detect |
+
+**Note:** Use `OUT/DIR/PINSEL/TCFG/TUNING/EVEN` custom instructions instead of direct memory access — they're faster and atomic.
 
 ---
 
-## NCO Frequency Calculation
+## NCO Frequency Calculator
 
 ```python
-# f_out = (tuning × 50_000_000) / 2^24
-# tuning = f_out × 2^24 / 50_000_000
+# f_out = (tuning × 50MHz) / 2^24
+# tuning = f_out × 2^24 / 50MHz
 
-def tuning(freq_hz):
-    return int(freq_hz * (1 << 24) / 50_000_000)
+def nco_tuning(freq_hz, clk_hz=50_000_000):
+    return int(freq_hz * (1 << 24) / clk_hz)
 
-# Common values @ 50MHz:
-# UART 3M:      0x0F5C29
-# SPI 25M:      0x800000
-# SPI 12.5M:    0x400000
-# I2C 100k:     0x051EB8
-# I2C 400k:     0x147AE1
-# CAN 500k:     0x19999A
-# I2S MCLK 12.288M:  0x2D1A94
-# I2S BCLK 3.072M:   0x0B46A5
-# I2S LRCK 48k:      0x00199A
-```
-
-**Load 24-bit tuning across 3 bytes:**
-```assembly
-ldi r1, 0x29        ; Low byte
-ldi r2, 0x5C        ; Mid byte
-ldi r3, 0x0F        ; High byte
-st [TIMER_BASE + TUNING], r1
-st [TIMER_BASE + TUNING + 1], r2
-st [TIMER_BASE + TUNING + 2], r3
-```
-
----
-
-## Pin Source Selection (PINSEL / Pin Matrix SEL registers)
-
-| SEL Value | Pin Source |
-|-----------|------------|
-| 0x0 | CPU OUT register (bit-bang) |
-| 0x1 | Timer 0 NCO clock |
-| 0x2 | Timer 1 NCO clock |
-| 0x3 | Timer 2 NCO clock |
-| 0x4 | Timer 3 NCO clock |
-| 0x5 | Timer 4 NCO clock |
-| 0x6 | Timer 5 NCO clock |
-| 0x7 | Timer 6 NCO clock |
-| 0x8 | Timer 7 NCO clock |
-| 0x9 | Timer 0 PWM |
-| 0xA | Timer 1 PWM |
-| 0xB | Timer 2 PWM |
-| 0xC | Timer 3 PWM |
-| 0xD | Timer 4 PWM |
-| 0xE | Timer 5 PWM |
-| 0xF | Timer 6 PWM |
-
-**Via PINSEL instruction (dynamic):**
-```assembly
-PINSEL r0, r1        ; Pin[r0] source = r1
-```
-
-**Via memory-mapped SEL registers (static, 4 pins per register):**
-```assembly
-; SEL register at 0xF101: pins 0,1,2,3 (4 bits each)
-; SEL register at 0xF102: pins 4,5,6,7
-ldi r0, 0x1111        ; Pin0=T0, Pin1=T1, Pin2=T2, Pin3=T3
-st [PIN_BASE + PIN_SEL], r0
-```
-
----
-
-## Complete Firmware Template
-
-```assembly
-; ============================================================
-; my_protocol.s — Template for new protocol
-; ============================================================
-
-.org 0x0000
-
-; ---- CONSTANTS ----
-TIMER_BASE = 0xF000
-PIN_BASE   = 0xF100
-
-TUNING   = 0x00
-MODE     = 0x05
-COMPARE  = 0x04
-EVEN     = 0x06
-EV_ST    = 0x07
-
-PIN_DIR     = 0x00
-PIN_SEL     = 0x01
-PIN_SEL_H   = 0x02
-PIN_PULL    = 0x03
-PIN_OUT     = 0x04
-PIN_IN      = 0x05
-PIN_OE      = 0x06
-
-MODE_OFF        = 0x00
-MODE_COUNT_UP   = 0x01
-MODE_COUNT_DOWN = 0x02
-MODE_NCO_CLK    = 0x03
-MODE_NCO_VAR    = 0x04
-MODE_PWM        = 0x05
-MODE_CAPTURE    = 0x06
-MODE_MEASURE    = 0x07
-
-SRC_CPU     = 0x0
-SRC_TIMER0  = 0x1
-SRC_TIMER1  = 0x2
-SRC_TIMER2  = 0x3
-SRC_TIMER3  = 0x4
-SRC_TIMER4  = 0x5
-SRC_TIMER5  = 0x6
-SRC_TIMER6  = 0x7
-SRC_TIMER7  = 0x8
-
-CFG_TIMER   = 0x01
-CFG_CPU     = 0x02
-CFG_PULLUP  = 0x04
-CFG_PULLDOWN= 0x08
-
-; ---- RESET VECTOR ----
-reset:
-    ldi r15, 0x0FFF      ; Stack pointer
+# Pre-calculated common values:
+COMMON_TUNINGS = {
+    # UART
+    'UART_3M':      0x0F5C29,  # 3,000,000
+    'UART_2M':      0x0A3D70,  # 2,000,000
+    'UART_1M':      0x051EB8,  # 1,000,000
+    'UART_115200':  0x0005EB,  # 115,200
+    'UART_9600':    0x000079,  # 9,600
     
-    ; === HARDWARE SETUP ===
-    ; Configure timers
-    call setup_timers
+    # SPI
+    'SPI_25M':      0x800000,  # 25,000,000
+    'SPI_12M5':     0x400000,  # 12,500,000
+    'SPI_6M25':     0x200000,  # 6,250,000
+    'SPI_1M':       0x051EB8,  # 1,000,000
+    
+    # I²C
+    'I2C_100K':     0x0051EB,  # 100,000
+    'I2C_400K':     0x0147AE,  # 400,000
+    'I2C_1M':       0x051EB8,  # 1,000,000
+    
+    # I2S (48 kHz base)
+    'I2S_MCLK_256': 0x2D1A94,  # 12,288,000 (48k × 256)
+    'I2S_MCLK_512': 0x5A3529,  # 24,576,000 (48k × 512)
+    'I2S_BCLK_32':  0x0B46A5,  # 3,072,000 (48k × 64)
+    'I2S_BCLK_64':  0x168D4A,  # 6,144,000 (48k × 128)
+    'I2S_LRCK':     0x00199A,  # 48,000
+    
+    # CAN
+    'CAN_500K':     0x01999A,  # 500,000
+    'CAN_250K':     0x00CCCD,  # 250,000
+    'CAN_125K':     0x006666,  # 125,000
+    
+    # USB Low Speed
+    'USB_LS':       0x07AE14,  # 1,500,000
+}
+```
+
+### Writing 24-bit Tuning (split across 3 registers)
+
+```assembly
+; Timer 0 = 3 Mbps UART (0x0F5C29)
+LDI  x1, 0x29        ; Low byte
+TUNING x0, x1
+LDI  x1, 0x5C        ; Mid byte
+TUNING x0, x1
+LDI  x1, 0x0F        ; High byte
+TUNING x0, x1
+TCFG   x0, MODE_NCO_CLK
+```
+
+---
+
+## Firmware Template
+
+```assembly
+        .org 0x0000
+
+; ============================================================================
+; CONSTANTS
+; ============================================================================
+.equ MODE_OFF       = 0x00
+.equ MODE_COUNT_UP  = 0x01
+.equ MODE_NCO_CLK   = 0x03
+.equ MODE_CAPTURE   = 0x08
+
+.equ SRC_CPU        = 0x0
+.equ SRC_TIMER0     = 0x1
+
+.equ TIMER_BASE     = 0xF000
+.equ PIN_BASE       = 0xF100
+
+; Protocol-specific tuning
+.equ BAUD_TUNING_LO = 0x29
+.equ BAUD_TUNING_MID = 0x5C
+.equ BAUD_TUNING_HI = 0x0F
+
+; ============================================================================
+; RESET / INITIALIZATION
+; ============================================================================
+reset:
+    ; Stack pointer
+    LDI  x15, 0x0FFF
     
     ; Configure pins
-    call setup_pins
+    ; Pin 0 = TX output (Timer 0 NCO)
+    DIR  x0, x1          ; x1=1 for output
+    LDI  x1, SRC_TIMER0
+    PINSEL x0, x1        ; Pin 0 → Timer 0
     
-    ; === MAIN LOOP ===
+    ; Pin 1 = RX input
+    LDI  x1, 0
+    DIR  x1, x1          ; Pin 1 = input
+    LDI  x1, SRC_CPU
+    PINSEL x1, x1        ; Pin 1 → CPU
+    
+    ; Configure Timer 0 as NCO for baud clock
+    LDI  x1, BAUD_TUNING_LO
+    TUNING x0, x1
+    LDI  x1, BAUD_TUNING_MID
+    TUNING x0, x1
+    LDI  x1, BAUD_TUNING_HI
+    TUNING x0, x1
+    LDI  x1, MODE_NCO_CLK
+    TCFG   x0, x1
+
+; ============================================================================
+; MAIN PROGRAM
+; ============================================================================
 main:
-    call protocol_task
-    jmp main
+    ; Your protocol implementation here
+    CALL uart_tx_init
+    CALL uart_rx_init
+    
+main_loop:
+    ; Poll for RX data
+    CALL uart_rx_poll
+    BNEZ x1, got_data
+    
+    ; Check for TX request
+    CALL uart_tx_poll
+    
+    JMP  main_loop
 
-; ---- TIMER SETUP ----
-setup_timers:
-    ; Timer 0: Protocol clock (example: 3M UART)
-    ldi r1, 0x29        ; tuning low
-    ldi r2, 0x5C        ; tuning mid
-    ldi r3, 0x0F        ; tuning high
-    st [TIMER_BASE + TUNING], r1
-    st [TIMER_BASE + TUNING + 1], r2
-    st [TIMER_BASE + TUNING + 2], r3
-    ldi r0, MODE_NCO_CLK
-    st [TIMER_BASE + MODE], r0
-    
-    ; Timer 1: Another clock (example: 48k LRCK)
-    ldi r1, 0x9A
-    ldi r2, 0x00
-    ldi r3, 0x00
-    st [TIMER_BASE + 16 + TUNING], r1
-    st [TIMER_BASE + 16 + TUNING + 1], r2
-    st [TIMER_BASE + 16 + TUNING + 2], r3
-    ldi r0, MODE_NCO_CLK
-    st [TIMER_BASE + 16 + MODE], r0
-    
-    ret
+got_data:
+    ; Process received byte in x1
+    CALL process_byte
+    JMP  main_loop
 
-; ---- PIN SETUP ----
-setup_pins:
-    ; Directions: pins 0-3 out, 4-7 in
-    ldi r0, 0x0F
-    st [PIN_BASE + PIN_DIR], r0
-    
-    ; Pin sources: 0=T0, 1=T1, 2=CPU, 3=CPU
-    ldi r0, 0x0210    ; Pin3=CPU, Pin2=CPU, Pin1=T1, Pin0=T0
-    st [PIN_BASE + PIN_SEL], r0
-    
-    ; Pull-ups on input pins
-    ldi r0, 0xF0      ; Pins 4-7 pull-up
-    st [PIN_BASE + PIN_PULL], r0
-    
-    ; Output enable
-    ldi r0, 0x0F
-    st [PIN_BASE + PIN_OE], r0
-    
-    ret
+; ============================================================================
+; SUBROUTINES
+; ============================================================================
 
-; ---- PROTOCOL TASK ----
-protocol_task:
-    ; Your state machine here
-    ; Example: UART TX one byte
-    ldi r7, 0x55        ; Data to send
-    call uart_tx_byte
-    ret
-
+; UART TX: send byte in x7
 uart_tx_byte:
-    ; Start bit (0)
-    ldi r0, 0           ; Pin 0
-    ldi r1, 0           ; Value 0
-    OUT r0, r1
-    ldi r8, 16          ; Cycles per bit (3M @ 50M = ~16)
-    WAIT r0, r8         ; Timer 0, wait r8 cycles
+    ; Start bit
+    LDI  x1, 0
+    OUT  x0, x1
+    WAIT x0, x8        ; x8 = bit_time_cycles
     
     ; 8 data bits
-    ldi r9, 8
+    LDI  x9, 8
 tx_loop:
-    AND r1, r7, 1       ; LSB
-    OUT r0, r1
-    SHR r7, r7, 1
-    WAIT r0, r8
-    DEC r9
-    BNEZ r9, tx_loop
+    AND  x1, x7, 1     ; Get LSB
+    OUT  x0, x1
+    SHR  x7, x7, 1
+    WAIT x0, x8
+    DEC  x9
+    BNEZ x9, tx_loop
     
-    ; Stop bit (1)
-    ldi r1, 1
-    OUT r0, r1
-    WAIT r0, r8
+    ; Stop bit
+    LDI  x1, 1
+    OUT  x0, x1
+    WAIT x0, x8
+    RET
+
+; UART RX: receive byte → x7
+uart_rx_byte:
+    ; Wait for start bit (falling edge)
+    WAITE x0, EV_FALL
     
-    ret
+    ; Wait 1.5 bit times to center of first data bit
+    LDI  x1, 24        ; 1.5 × 16
+    WAIT x0, x1
+    
+    ; 8 data bits
+    LDI  x9, 8
+    LDI  x7, 0
+rx_loop:
+    WAIT x0, x8        ; Wait 1 bit time
+    IN   x1, x1        ; Read pin 1
+    SHR  x7, x7, 1     ; Shift right (LSB first)
+    OR   x7, x7, x1    ; Insert bit
+    DEC  x9
+    BNEZ x9, rx_loop
+    
+    ; Wait for stop bit
+    WAIT x0, x8
+    RET
 
-; ---- VECTORS ----
-.org 0x0FF0
-.word reset
-.word 0
-.word 0
-.word 0
-.word 0
-.word 0
-.word 0
-.word 0
-```
-
----
-
-## Build & Load Commands
-
-```bash
-cd /home/muqtada/Documents/progleprot
-
-# 1. Assemble
-python3 scripts/asm.py firmware/my_protocol.s -o firmware/my_protocol.bin
-
-# 2. Load via UART (Basys3)
-python3 scripts/uart_load_firmware.py --port /dev/ttyUSB0 --firmware firmware/my_protocol.bin
-
-# 3. Verify on hardware
-# - LED[0] = CPU running
-# - LED[1] = CPU error  
-# - LED[15:8] = Pin inputs
-# - LED[7:2] = Pin outputs
-# - Scope/logic analyzer on PMOD JA pins
-```
-
----
-
-## Existing Firmware Examples
-
-| File | Protocol | Key Techniques |
-|------|----------|----------------|
-| `firmware/uart.s` | UART TX/RX @ 3Mbps | WAIT for bit timing, OUT for bit-bang |
-| `firmware/spi.s` | SPI Master @ 25MHz | PINSEL for SCK (Timer NCO), WAITE for edges |
-| `firmware/i2c.s` | I²C Master @ 100kHz | Open-drain emulation (DIR toggle), WAITE for ACK |
-| `firmware/i2s_clocks.s` | I2S clock generation | 3 Timers as NCO (MCLK/BCLK/LRCK), Timer capture for frame sync |
-
----
-
-## Debugging Firmware
-
-### 1. LED Debug Registers
-```assembly
-; SW[3:0] selects register shown on LED[15:0]
-; In hardware: dbg_reg_idx = sw[3:0]
-```
-
-### 2. Printf-Style Pin Toggle
-```assembly
-debug_pin:
-    ldi r0, 7           ; Pin 7
-    ldi r1, 1
-    OUT r0, r1          ; High
-    ldi r2, 10000
-    WAIT r0, r2
-    ldi r1, 0
-    OUT r0, r1          ; Low
-    ret
-```
-
-### 3. Simulation with VCD
-```bash
-# Create testbench (see sim/tb_emu_uart.v)
-iverilog -g2012 -o sim.vvp -Isim -Irtl \
-  sim/tb_my_proto.v rtl/emu_top.v rtl/cpu_core.v \
-  rtl/timer_coproc.v rtl/pin_matrix.v rtl/host_if.v rtl/prog_ram.v
-vvp sim.vvp
-gtkwave sim.vcd
-```
-
-### 4. Check Timer Events
-```assembly
-ld r0, [TIMER_BASE + EV_ST]  ; Read + clear events
-and r0, r0, 0x01             ; Check bit 0
-bnez r0, event_happened
+; ============================================================================
+; VECTOR TABLE
+; ============================================================================
+        .org 0x0FF0
+        .word reset
+        .word 0
+        .word 0
+        .word 0
+        .word 0
+        .word 0
+        .word 0
+        .word 0
 ```
 
 ---
 
 ## Common Patterns
 
-### Wait N Microseconds
+### Bit-Bang Output Loop
 ```assembly
-; At 50MHz: 1 cycle = 20ns
-; 1us = 50 cycles
-; 1ms = 50000 cycles (needs 16-bit)
-WAIT_US:
-    ; r1 = microseconds
-    ldi r2, 50
-    MUL r1, r1, r2      ; r1 = us × 50
-    WAIT r0, r1         ; Timer 0
-    ret
+; Send N bits from register, MSB first
+send_bits_msb:
+    LDI  x9, 8          ; Bit count
+send_loop:
+    SLL  x10, x7, 7     ; MSB to bit 7
+    SHR  x10, x10, 7    ; Isolate
+    OUT  pin, x10
+    WAIT timer, cycles
+    SLL  x7, x7, 1      ; Shift left for next MSB
+    DEC  x9
+    BNEZ x9, send_loop
+    RET
 ```
 
-### Pin Toggle with Timer NCO (Hardware Clock)
+### Bit-Bang Input Loop
 ```assembly
-; Instead of WAIT loop, route pin to Timer NCO
-setup_pwm:
-    ldi r0, MODE_PWM
-    st [TIMER_BASE + MODE], r0
-    ldi r0, 1000        ; Period
-    st [TIMER_BASE + COMPARE], r0  ; Duty cycle
-    ldi r1, SRC_TIMER0
-    PINSEL r2, r1       ; Pin 2 = Timer 0 PWM
-    ret
+; Receive N bits to register, MSB first
+recv_bits_msb:
+    LDI  x9, 8
+    LDI  x7, 0
+recv_loop:
+    WAIT timer, cycles
+    IN   x10, pin
+    SLL  x7, x7, 1
+    OR   x7, x7, x10
+    DEC  x9
+    BNEZ x9, recv_loop
+    RET
 ```
 
-### State Machine Template
+### Ring Buffer (TX)
 ```assembly
-proto_state_machine:
-    ld r0, [STATE_VAR]
-    
-    ; State 0: IDLE
-    beqz r0, state_idle
-    
-    ; State 1: TX
-    ldi r1, 1
-    beq r0, r1, state_tx
-    
-    ; State 2: RX
-    ldi r1, 2
-    beq r0, r1, state_rx
-    
-    jmp proto_done
+; x1 = tx_head, x2 = tx_tail, x3 = buffer_base
+tx_push:
+    ; Check full: (head + 1) & MASK == tail
+    ADD  x4, x1, 1
+    AND  x4, x4, 0x1F   ; MASK = 31 (32-byte buffer)
+    BEQZ x4, tx_full    ; If equal, full
+    ; Store
+    ADD  x5, x3, x1
+    ST   [x5], x7       ; Store byte
+    ; Advance head
+    MOV  x1, x4
+    RET
+tx_full:
+    ; Handle overflow
+    RET
+```
 
-state_idle:
-    ; Check for start condition
-    ld r1, [PIN_BASE + PIN_IN]
-    and r1, r1, 0x01
-    bnez r1, proto_done
-    ldi r0, 1
-    st [STATE_VAR], r0
-    jmp proto_done
-
-state_tx:
-    ; Transmit logic
-    call uart_tx_byte
-    ldi r0, 0
-    st [STATE_VAR], r0
-    jmp proto_done
-
-state_rx:
-    ; Receive logic
-    call uart_rx_byte
-    ldi r0, 0
-    st [STATE_VAR], r0
-
-proto_done:
-    ret
+### Timer-Based Delay (Microseconds)
+```assembly
+; Delay using Timer 0 in COUNT_UP mode
+delay_us:
+    ; x1 = microseconds
+    ; Timer 0 counts at 50MHz = 50 cycles/μs
+    MUL  x2, x1, 50     ; Cycles needed (needs MUL routine)
+    TCFG x0, MODE_COUNT_UP
+    ; Reset counter
+    LDI  x3, 0
+    ; (write to timer counter register)
+    WAIT x0, x2
+    RET
 ```
 
 ---
 
-## Assembler Limitations (Current)
+## Debugging Tips
 
-| Limitation | Workaround |
-|------------|------------|
-| No `MUL`/`DIV` instructions | Implement in software or use shifts |
-| No `LOAD`/`STORE` | Use memory-mapped I/O (ST/LD to 0xFxxx) |
-| Branch offset ±127 instructions | Use `JALR` for far jumps |
-| 8-bit immediates only | Use multiple `ADDI`/`ORI` for 16-bit |
-| No macros in asm.py | Use `.word` for raw instructions or preprocess |
-
----
-
-## Workflow Summary
-
-```
-┌─────────────────────┐
-│ 1. Design Protocol  │  Timing diagram, calculate NCO values
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 2. Write Assembly   │  firmware/my_proto.s
-│    (use template)   │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 3. Assemble         │  python3 scripts/asm.py firmware/my_proto.s
-│                     │    -o firmware/my_proto.bin
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 4. Simulate (opt)   │  iverilog + testbench → VCD → gtkwave
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 5. Load Hardware    │  python3 scripts/uart_load_firmware.py
-│    (Basys3/ASIC)    │    --port /dev/ttyUSB0 --firmware my_proto.bin
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 6. Verify           │  Scope on PMOD, check LEDs
-│    on Pins          │
-└─────────────────────┘
-```
-
----
-
-## Quick Reference Card
-
+### 1. LED Blink for Visibility
 ```assembly
-; === REGISTERS ===
-; r0 = zero (always 0)
-; r1-r13 = general purpose
-; r14 = link register (JAL)
-; r15 = stack pointer
+debug_blink:
+    LDI  x1, 1
+    OUT  x7, x1         ; Pin 7 = LED
+    WAIT x0, 1000000
+    LDI  x1, 0
+    OUT  x7, x1
+    WAIT x0, 1000000
+    RET
+```
 
-; === CUSTOM INSTRUCTIONS ===
-OUT   pin, val      ; pin = val[0]
-DIR   pin, dir      ; pin direction = dir[0]
-WAIT  timer, cycles ; stall cycles
-WAITE timer, mask   ; stall until event
-PINSEL pin, src     ; pin source select
-TCFG  timer, mode   ; timer mode
-TUNING timer, val   ; NCO tuning (24-bit)
-EVEN  timer, mask   ; event enable
-TIME  rd, timer     ; read counter
-CAPRD rd, timer     ; read capture
-HALT                ; stop CPU
+### 2. UART Print Register
+```assembly
+; Print x1 as hex via UART (assumes UART TX firmware loaded)
+debug_print_hex:
+    ; x1 = value to print
+    ; Output 4 hex nibbles
+    LDI  x2, 4
+hex_loop:
+    AND  x3, x1, 0xF
+    ; Convert to ASCII
+    CMP  x3, 10
+    BLTZ x3, is_digit
+    ADDI x3, x3, 'A' - 10
+    JMP  put_char
+is_digit:
+    ADDI x3, x3, '0'
+put_char:
+    CALL uart_tx_byte   ; x3 = char
+    SRL  x1, x1, 4
+    DEC  x2
+    BNEZ x2, hex_loop
+    RET
+```
 
-; === TIMER MODES ===
-0=OFF 1=UP 2=DOWN 3=NCO_CLK 4=NCO_VAR 5=PWM 6=CAPTURE 7=MEASURE
-
-; === PIN SOURCES ===
-0=CPU 1=T0 2=T1 3=T2 4=T3 5=T4 6=T5 7=T6 8=T7 9=T0_PWM ...
-
-; === MEMORY MAP ===
-0xF000 = Timer0  0xF100 = Pin_DIR  0xF104 = Pin_OUT  0xF105 = Pin_IN
+### 3. Single-Step with Breakpoint
+```assembly
+; Insert HALT to stop CPU at specific point
+debug_break:
+    HALT
+    ; CPU stops, inspect registers via debug port
 ```
 
 ---
 
-*Write firmware → Assemble → Load → Run. The protocol lives in YOUR code.*
+## Simulation Testing
+
+```bash
+# Run UART testbench
+cd /home/muqtada/Documents/progleprot
+iverilog -o sim_uart.vvp -I rtl -I sim \
+  rtl/cpu_core.v rtl/timer_coproc.v rtl/pin_matrix.v rtl/host_if.v rtl/prog_ram.v rtl/emu_top.v \
+  sim/tb_emu_uart.v
+vvp sim_uart.vvp
+
+# Run SPI testbench
+iverilog -o sim_spi.vvp ... sim/tb_emu_spi_master.v
+vvp sim_spi.vvp
+
+# Run I2C testbench
+iverilog -o sim_i2c.vvp ... sim/tb_emu_i2c_master.v
+vvp sim_i2c.vvp
+```
+
+---
+
+## Instruction Encoding Reference
+
+| Instruction | Encoding (16-bit) |
+|-------------|-------------------|
+| ADD x1,x2,x3 | 0x0123 (op=0, rd=1, rs1=2, rs2=3) |
+| ADDI x1,0x29 | 0x8129 (op=8, rd=1, imm=0x29) |
+| BEQZ x1,label | 0xA1xx (op=A, rs1=1, offset=xx) |
+| JAL x1,label | 0xE1xx (op=E, rd=1, offset=xx) |
+| OUT pin,val | 0xF0pv (op=F, funct=0, rs1=pin, rs2=val) |
+| DIR pin,dir | 0xF1pd (op=F, funct=1, rs1=pin, rs2=dir) |
+| WAIT tmr,cyc | 0xF2tc (op=F, funct=2, rs1=tmr, rs2=cyc) |
+| WAITE tmr,evt | 0xF3te (op=F, funct=3, rs1=tmr, rs2=evt) |
+| PINSEL pin,src | 0xF7ps (op=F, funct=7, rs1=pin, rs2=src) |
+| TCFG tmr,mode | 0xF5tm (op=F, funct=5, rs1=tmr, rs2=mode) |
+| TUNING tmr,val | 0xF6tv (op=F, funct=6, rs1=tmr, rs2=val) |
+| HALT | 0xFFFF |
+
+---
+
+*For protocol-specific examples, see `I2S_TUTORIAL.md` and firmware/*.s files.*
