@@ -20,7 +20,7 @@ module cpu_core #(
     input  wire [15:0]             prog_data,
     // Timer coprocessor interface
     output wire                    timer_wr_en,
-    output wire [3:0]              timer_wr_addr,
+    output wire [6:0]              timer_wr_addr,
     output wire [15:0]             timer_wr_data,
     input  wire [15:0]             timer_rd_data,
     // Pin matrix interface
@@ -39,7 +39,10 @@ module cpu_core #(
     output wire                    cpu_error,
     // Debug
     output wire [ADDR_W-1:0]       pc_debug,
-    output wire [15:0]             reg_debug [0:15]
+    // Debug register read port
+    input  wire [3:0]              dbg_reg_idx,
+    output wire [15:0]             dbg_reg_data
+    // Note: reg_debug array removed for Yosys compatibility
 );
 
     // ISA Opcodes
@@ -52,15 +55,16 @@ module cpu_core #(
     // Custom timing instruction funct codes (for OP_CUSTOM)
     localparam FUNCT_OUT    = 4'h0;  // OUT pin, rs1 (pin in rs1[3:0], val in rs1[15:4]?)
     localparam FUNCT_DIR    = 4'h1;  // DIR pin, rs1
-    localparam FUNCT_WAIT   = 4'h2;  // WAIT timer, rs1 (cycles)
+    localparam FUNCT_WAIT   = 4'h2;  // WAIT cycles, rs1 (timer), rs2 (cycles)
     localparam FUNCT_WAITE  = 4'h3;  // WAITE timer, rs1 (pin event)
     localparam FUNCT_TIME   = 4'h4;  // TIME rd, timer (timer in rs1[3:0])
     localparam FUNCT_TCFG   = 4'h5;  // TCFG timer, rs1, rs2
-    localparam FUNCT_PINSEL = 4'h6;  // PINSEL pin, rs1
-    localparam FUNCT_EVEN   = 4'h7;  // EVEN timer, rs1
-    localparam FUNCT_SWAP   = 4'h8;  // SWAP (trigger bank swap)
-    localparam FUNCT_VERIFY = 4'h9;  // VERIFY rd (read CRC)
-    localparam FUNCT_CAPRD  = 4'hA;  // CAPRD rd, timer
+    localparam FUNCT_TUNING  = 4'h6;  // TUNING timer, rs1, rs2
+    localparam FUNCT_PINSEL = 4'h7;  // PINSEL pin, rs1
+    localparam FUNCT_EVEN   = 4'h8;  // EVEN timer, rs1
+    localparam FUNCT_SWAP   = 4'h9;  // SWAP (trigger bank swap)
+    localparam FUNCT_VERIFY = 4'hA;  // VERIFY rd (read CRC)
+    localparam FUNCT_CAPRD  = 4'hB;  // CAPRD rd, timer
     localparam FUNCT_HALT   = 4'hF;  // HALT - stop CPU
 
     // Peripheral base addresses
@@ -69,12 +73,12 @@ module cpu_core #(
     localparam HOST_BASE   = 16'hF200;
 
     // Pipeline registers
-    reg [1:0]  pipe_st;
-    localparam S_IF   = 2'd0;
-    localparam S_ID   = 2'd1;
-    localparam S_EX   = 2'd2;
-    localparam S_WB   = 2'd3;
-    localparam S_STALL = 2'd4;
+    reg [2:0]  pipe_st;
+    localparam S_IF   = 3'd0;
+    localparam S_ID   = 3'd1;
+    localparam S_EX   = 3'd2;
+    localparam S_WB   = 3'd3;
+    localparam S_STALL = 3'd4;
 
     // CPU run state
     reg cpu_running;
@@ -103,6 +107,8 @@ module cpu_core #(
     reg [3:0]        id_custom_funct;
     reg              id_stall;
     reg              id_is_halt;
+    reg              id_is_wait;     // WAIT instruction flag
+    reg [15:0]       id_wait_cycles; // cycles to wait
 
     // EX stage - pipeline registers
     reg [15:0]       ex_alu_result;
@@ -117,6 +123,8 @@ module cpu_core #(
     reg [15:0]       ex_rs1_val, ex_rs2_val;
     reg [ADDR_W-1:0] ex_pc;
     reg              ex_is_halt;
+    reg              ex_is_wait;
+    reg [15:0]       ex_wait_cnt;
 
     // WB stage - pipeline registers
     reg [15:0]       wb_data;
@@ -138,6 +146,8 @@ module cpu_core #(
     reg [15:0] rs1_val, rs2_val;
     reg [15:0] imm8_sext;
     reg [15:0] write_data;  // WB stage write data
+    reg [15:0] wait_cycles;
+    reg        wait_stall;
 
     // ALU function
     function [15:0] alu_op;
@@ -191,10 +201,13 @@ module cpu_core #(
                     pipe_st <= S_ID;
                 end
                 S_ID: begin
-                    if (id_stall) pipe_st <= S_STALL;
+                    if (id_stall || wait_stall) pipe_st <= S_STALL;
                     else pipe_st <= S_EX;
                 end
-                S_STALL: pipe_st <= S_EX;
+                S_STALL: begin
+                    if (ex_is_wait && ex_wait_cnt > 0) pipe_st <= S_STALL;
+                    else pipe_st <= S_EX;
+                end
                 S_EX: pipe_st <= S_WB;
                 S_WB: pipe_st <= S_IF;
             endcase
@@ -207,7 +220,7 @@ module cpu_core #(
     end
 
     // Convert byte address (PC) to word address for program memory
-    assign prog_addr = pc[ADDR_W-1:1];
+    assign prog_addr = {1'b0, pc[ADDR_W-1:1]};
 
     // IF/ID register
     always @(posedge clk or negedge rst_n) begin
@@ -232,9 +245,25 @@ module cpu_core #(
             id_branch_taken <= 0; id_branch_target <= 0;
             id_is_custom <= 0; id_custom_funct <= 0; id_stall <= 0;
             id_is_halt <= 0;
+            id_is_wait <= 0;
+            id_wait_cycles <= 0;
         end else if (cpu_running && pipe_st == S_ID) begin
             id_instr <= if_instr;
             id_pc <= pc;
+
+            // Default values
+            id_reg_write <= 0;
+            id_mem_read <= 0;
+            id_mem_write <= 0;
+            id_branch_taken <= 0;
+            id_is_custom <= 0;
+            id_custom_funct <= 0;
+            id_stall <= 0;
+            id_is_halt <= 0;
+            id_is_wait <= 0;
+            id_wait_cycles <= 0;
+            wait_cycles <= 0;
+            wait_stall <= 0;
 
             // Decode register indices based on opcode
             case (if_instr[15:12])
@@ -257,37 +286,6 @@ module cpu_core #(
                     dec_rs2  = if_instr[3:0];
                     id_custom_funct <= if_instr[11:8];
                     id_funct <= if_instr[11:8];
-
-                    // Handle custom instructions that write to peripherals
-                    case (if_instr[11:8])
-                        FUNCT_OUT: begin  // OUT pin, value
-                            id_mem_write <= 1'b1;
-                            id_mem_addr <= PIN_BASE + 16'h4;  // REG_OUT
-                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
-                        end
-                        FUNCT_DIR: begin  // DIR pin, direction
-                            id_mem_write <= 1'b1;
-                            id_mem_addr <= PIN_BASE + 16'h0;  // REG_DIR
-                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
-                        end
-                        FUNCT_PINSEL: begin  // PINSEL pin, source
-                            id_mem_write <= 1'b1;
-                            if (if_instr[7:4] < 4) begin
-                                id_mem_addr <= PIN_BASE + 16'h1;  // REG_SEL (pins 0-3)
-                            end else begin
-                                id_mem_addr <= PIN_BASE + 16'h2;  // REG_SEL_H (pins 4-7)
-                            end
-                            id_mem_wdata <= rs2_val;
-                        end
-                        FUNCT_TCFG: begin  // TCFG timer, config
-                            id_mem_write <= 1'b1;
-                            id_mem_addr <= TIMER_BASE + (if_instr[7:4] << 2) + 16'h5;  // REG_MODE
-                            id_mem_wdata <= rs2_val;
-                        end
-                        default: begin
-                            // Other custom instructions (TIME, VERIFY, CAPRD, HALT, etc.) don't write memory
-                        end
-                    endcase
                 end
                 default: begin
                     dec_rd   = 4'd0;
@@ -296,22 +294,7 @@ module cpu_core #(
                 end
             endcase
 
-            id_rd   <= dec_rd;
-            id_rs1  <= dec_rs1;
-            id_rs2  <= dec_rs2;
-            id_imm12 <= if_instr[11:0];
-            id_off8  <= if_instr[7:0];
-
-            // Default values
-            id_reg_write <= 0;
-            id_mem_read <= 0;
-            id_mem_write <= 0;
-            id_branch_taken <= 0;
-            id_is_custom <= 0;
-            id_stall <= 0;
-            id_is_halt <= 0;
-
-            // Forwarding logic INLINE using dec_rs1/dec_rs2
+            // Forwarding logic INLINE using dec_rs1/dec_rs2 - MOVED UP FOR CUSTOM INSTRUCTIONS
             // RS1 value with forwarding
             if (dec_rs1 == 4'd0) begin
                 rs1_val = 16'h0000;
@@ -337,6 +320,69 @@ module cpu_core #(
             id_rs1_val <= rs1_val;
             id_rs2_val <= rs2_val;
 
+            id_rd   <= dec_rd;
+            id_rs1  <= dec_rs1;
+            id_rs2  <= dec_rs2;
+            id_imm12 <= if_instr[11:0];
+            id_off8  <= if_instr[7:0];
+
+            // Now handle custom instructions using the computed rs1_val/rs2_val
+            if (if_instr[15:12] == OP_CUSTOM) begin
+                // Check for WAIT instruction
+                if (if_instr[11:8] == FUNCT_WAIT) begin
+                    id_is_wait <= 1;
+                    wait_cycles = rs2_val;  // rs2 has wait cycles
+                    wait_stall = (rs2_val != 0);
+                    id_wait_cycles <= rs2_val;
+                end
+
+                id_is_custom <= 1;
+                id_reg_write <= (if_instr[11:8] == FUNCT_TIME || 
+                                 if_instr[11:8] == FUNCT_VERIFY || 
+                                 if_instr[11:8] == FUNCT_CAPRD);
+                id_is_halt <= (if_instr[11:8] == FUNCT_HALT);
+
+                // Handle custom instructions that write to peripherals
+                case (if_instr[11:8])
+                    FUNCT_OUT: begin  // OUT pin, value
+                        id_mem_write <= 1'b1;
+                        id_mem_addr <= PIN_BASE + 16'h4;  // REG_OUT
+                        id_mem_wdata <= (16'b1 << rs1_val[3:0]);
+                    end
+                    FUNCT_DIR: begin  // DIR pin, direction
+                        id_mem_write <= 1'b1;
+                        id_mem_addr <= PIN_BASE + 16'h0;  // REG_DIR
+                        id_mem_wdata <= (16'b1 << rs1_val[3:0]);
+                    end
+                    FUNCT_PINSEL: begin  // PINSEL pin, source
+                        id_mem_write <= 1'b1;
+                        if (rs1_val[3:0] < 4) begin
+                            id_mem_addr <= PIN_BASE + 16'h1;  // REG_SEL (pins 0-3)
+                        end else begin
+                            id_mem_addr <= PIN_BASE + 16'h2;  // REG_SEL_H (pins 4-7)
+                        end
+                        id_mem_wdata <= ({12'h0, rs2_val[3:0]} << (rs1_val[3:0] << 2));  // Shift source by pin*4
+                    end
+                    FUNCT_TUNING: begin  // TUNING timer, rs1 (timer), rs2 (tuning value)
+                        id_mem_write <= 1'b1;
+                        // Timer address: [6:3]=timer_idx, [3:0]=REG_TUNING(0) or REG_TUNING_H(1)
+                        // rs2[8] = select register (0=low, 1=high)
+                        // For REG_TUNING (low 8 bits): write rs2_val[7:0]
+                        // For REG_TUNING_H (high 16 bits): write rs2_val[15:0]
+                        id_mem_addr <= TIMER_BASE + ({12'h0, rs1_val[3:0]} << 4) + (rs2_val[8] ? 16'h1 : 16'h0);
+                        id_mem_wdata <= rs2_val[8] ? rs2_val[15:0] : {8'h0, rs2_val[7:0]};
+                    end
+                    FUNCT_TCFG: begin  // TCFG timer, config
+                        id_mem_write <= 1'b1;
+                        id_mem_addr <= TIMER_BASE + ({12'h0, rs1_val[3:0]} << 4) + 16'h5;  // REG_MODE (16 bytes per timer)
+                        id_mem_wdata <= rs2_val;
+                    end
+                    default: begin
+                        // Other custom instructions (TIME, VERIFY, CAPRD, HALT, etc.) don't write memory
+                    end
+                endcase
+            end
+
             // Compute ALU result in ID stage for forwarding to next instruction
             case (if_instr[15:12])
                 OP_ALU: begin
@@ -352,43 +398,10 @@ module cpu_core #(
                     id_rs2_val <= imm8_sext;
                 end
                 OP_CUSTOM: begin
-                    id_is_custom <= 1;
-                    id_custom_funct <= if_instr[11:8];
-                    id_reg_write <= (if_instr[11:8] == FUNCT_TIME || 
-                                     if_instr[11:8] == FUNCT_VERIFY || 
-                                     if_instr[11:8] == FUNCT_CAPRD);
-                    id_is_halt <= (if_instr[11:8] == FUNCT_HALT);
-
-                    // Handle custom instructions that write to peripherals
-                    case (if_instr[11:8])
-                        FUNCT_OUT: begin  // OUT pin, value
-                            id_mem_write <= 1'b1;
-                            id_mem_addr <= PIN_BASE + 16'h4;  // REG_OUT
-                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
-                        end
-                        FUNCT_DIR: begin  // DIR pin, direction
-                            id_mem_write <= 1'b1;
-                            id_mem_addr <= PIN_BASE + 16'h0;  // REG_DIR
-                            id_mem_wdata <= (rs2_val[0] << if_instr[7:4]);
-                        end
-                        FUNCT_PINSEL: begin  // PINSEL pin, source
-                            id_mem_write <= 1'b1;
-                            if (if_instr[7:4] < 4) begin
-                                id_mem_addr <= PIN_BASE + 16'h1;  // REG_SEL (pins 0-3)
-                            end else begin
-                                id_mem_addr <= PIN_BASE + 16'h2;  // REG_SEL_H (pins 4-7)
-                            end
-                            id_mem_wdata <= rs2_val;
-                        end
-                        FUNCT_TCFG: begin  // TCFG timer, config
-                            id_mem_write <= 1'b1;
-                            id_mem_addr <= TIMER_BASE + (if_instr[7:4] << 2) + 16'h5;  // REG_MODE
-                            id_mem_wdata <= rs2_val;
-                        end
-                        default: begin
-                            // Other custom instructions (TIME, VERIFY, CAPRD, HALT, etc.) don't write memory
-                        end
-                    endcase
+                    // Custom instruction ALU result handled in WB
+                    if (id_is_wait) begin
+                        // WAIT doesn't write register
+                    end
                 end
             endcase
 
@@ -412,27 +425,37 @@ module cpu_core #(
             ex_rs1_val <= 0; ex_rs2_val <= 0;
             ex_pc <= 0;
             ex_is_halt <= 0;
-        end else if (cpu_running && pipe_st == S_EX) begin
-            ex_rd <= id_rd;
-            ex_reg_write <= id_reg_write;
-            ex_mem_read <= id_mem_read;
-            ex_mem_write <= id_mem_write;
-            ex_mem_addr <= id_mem_addr;
-            ex_mem_wdata <= id_mem_wdata;
-            ex_is_custom <= id_is_custom;
-            ex_custom_funct <= id_custom_funct;
-            ex_rs1 <= id_rs1;
-            ex_rs2 <= id_rs2;
-            ex_rs1_val <= id_rs1_val;
-            ex_rs2_val <= id_rs2_val;
-            ex_pc <= id_pc;
-            ex_is_halt <= id_is_halt;
+            ex_is_wait <= 0;
+            ex_wait_cnt <= 0;
+        end else if (cpu_running && (pipe_st == S_EX || pipe_st == S_STALL)) begin
+            // Load new instruction from ID when:
+            // 1. Normal EX stage (pipe_st == S_EX)
+            // 2. WAIT completing in STALL (ex_wait_cnt == 1, about to go to WB)
+            if (pipe_st == S_EX || (pipe_st == S_STALL && ex_is_wait && ex_wait_cnt == 1)) begin
+                ex_rd <= id_rd;
+                ex_reg_write <= id_reg_write;
+                ex_mem_read <= id_mem_read;
+                ex_mem_write <= id_mem_write;
+                ex_mem_addr <= id_mem_addr;
+                ex_mem_wdata <= id_mem_wdata;
+                ex_is_custom <= id_is_custom;
+                ex_custom_funct <= id_custom_funct;
+                ex_rs1 <= id_rs1;
+                ex_rs2 <= id_rs2;
+                ex_rs1_val <= id_rs1_val;
+                ex_rs2_val <= id_rs2_val;
+                ex_pc <= id_pc;
+                ex_is_halt <= id_is_halt;
+                ex_is_wait <= id_is_wait;
+                ex_wait_cnt <= id_wait_cycles;
+            end
 
             // Pass through ALU result from ID stage
             ex_alu_result <= id_alu_result;
 
-            if (id_is_custom) begin
-                // Custom instructions - peripheral access happens in WB
+            // Decrement wait counter if active
+            if (ex_is_wait && ex_wait_cnt > 0) begin
+                ex_wait_cnt <= ex_wait_cnt - 1;
             end
         end
     end
@@ -484,7 +507,7 @@ module cpu_core #(
 
     // Peripheral write enables (from EX stage)
     assign timer_wr_en = (cpu_running && pipe_st == S_EX) && ex_mem_write && (ex_mem_addr >= TIMER_BASE) && (ex_mem_addr < PIN_BASE);
-    assign timer_wr_addr = ex_mem_addr[3:0];
+    assign timer_wr_addr = ex_mem_addr[6:0];
     assign timer_wr_data = ex_mem_wdata;
 
     assign pin_wr_en = (cpu_running && pipe_st == S_EX) && ex_mem_write && (ex_mem_addr >= PIN_BASE) && (ex_mem_addr < HOST_BASE);
@@ -505,12 +528,7 @@ module cpu_core #(
     assign cpu_error = 1'b0;
     assign pc_debug = pc;
 
-    // Debug register access
-    genvar g;
-    generate
-        for (g = 0; g < 16; g = g + 1) begin : reg_dbg
-            assign reg_debug[g] = regs[g];
-        end
-    endgenerate
+    // Debug register read port
+    assign dbg_reg_data = regs[dbg_reg_idx];
 
 endmodule

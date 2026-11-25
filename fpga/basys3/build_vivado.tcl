@@ -3,7 +3,7 @@
 
 create_project -force basys3_proto_emu ./basys3_proto_emu -part xc7a35tcpg236-1
 
-# Add sources
+# Add sources (uart_rx/uart_tx are embedded in basys3_protocol_emu.v)
 add_files -norecurse \
     ../../rtl/emu_top.v \
     ../../rtl/cpu_core.v \
@@ -12,9 +12,7 @@ add_files -norecurse \
     ../../rtl/host_if.v \
     ../../rtl/prog_ram.v \
     ./basys3_protocol_emu.v \
-    ./axi_lite_wrapper.v \
-    ./uart_rx.v \
-    ./uart_tx.v
+    ./axi_lite_wrapper.v
 
 # Add constraints
 add_files -fileset constrs_1 -norecurse ./basys3.xdc
@@ -24,8 +22,6 @@ set_property top basys3_protocol_emu [current_fileset]
 
 # Synthesis settings
 set_property strategy Flow_AreaOptimized_high [get_runs synth_1]
-set_property -name {STEPS.SYNTH_DESIGN.ARGS.MORE OPTIONS} \
-    {-flatten_hierarchy full} [get_runs synth_1]
 
 # Implementation settings  
 set_property strategy Performance_Explore [get_runs impl_1]

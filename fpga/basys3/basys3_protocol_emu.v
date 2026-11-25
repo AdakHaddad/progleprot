@@ -72,12 +72,12 @@ module basys3_protocol_emu #(
     // ------------------------------------------------------------------------
     // UART Host Interface (for firmware loading via USB-UART)
     // ------------------------------------------------------------------------
-    wire [ADDR_W-1:0]   host_wr_addr;
-    wire [PROG_W-1:0]   host_wr_data;
-    wire                host_wr_en;
-    wire                host_seq_start;
-    wire [ADDR_W-1:0]   host_seq_prog_len;
-    wire [1:0]          host_state;
+    reg [ADDR_W-1:0]   host_wr_addr;
+    reg [PROG_W-1:0]   host_wr_data;
+    reg                host_wr_en;
+    reg                host_seq_start;
+    reg [ADDR_W-1:0]   host_seq_prog_len;
+    wire [1:0]         host_state;
     
     // Simple UART receiver for host commands
     // Format: [CMD:8][ADDR_H:8][ADDR_L:8][DATA_H:8][DATA_L:8]
@@ -190,8 +190,8 @@ module basys3_protocol_emu #(
         .pin_in(pmod_ja_in),
         .pin_out(pmod_ja_out),
         .pin_oe(pmod_ja_oe),
-        .spi_sck(1'b0),      // Not used with UART host
-        .spi_mosi(1'b0),
+        .spi_sck(host_wr_addr[0]),      // Not used with UART host - repurpose for debug
+        .spi_mosi(host_wr_data[0]),
         .spi_miso(),
         .spi_cs_n(1'b1),
         .cpu_running(cpu_running),

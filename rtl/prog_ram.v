@@ -22,6 +22,8 @@ module prog_ram #(
     (* ram_style = "block" *)
     reg [WIDTH-1:0] mem [0:DEPTH-1];
 
+    integer i;
+
     // Host write (synchronous)
     always @(posedge clk) begin
         if (host_wr_en) begin
@@ -36,7 +38,6 @@ module prog_ram #(
 
     // Initialize to NOP (0x0000 for 16-bit, or OP_NOP for 32-bit)
     initial begin
-        integer i;
         for (i = 0; i < DEPTH; i = i + 1) begin
             mem[i] = {WIDTH{1'b0}};
         end

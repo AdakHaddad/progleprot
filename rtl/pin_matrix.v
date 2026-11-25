@@ -54,6 +54,7 @@ module pin_matrix #(
     reg [NUM_PINS-1:0] pin_in_prev;
 
     integer i;
+    reg [15:0] pull_data_reg;
 
     // Synchronize pin inputs (2-stage for metastability)
     always @(posedge clk or negedge rst_n) begin
@@ -160,17 +161,21 @@ module pin_matrix #(
         $display("t=%0t PIN_MATRIX PIN_SEL[2] CHANGED: pin_sel[2]=%h", $time, pin_sel[2]);
     end
 
+    // Read handling - compute pull_data in separate block
+    always @(*) begin
+        pull_data_reg = 16'h0000;
+        for (i = 0; i < NUM_PINS; i = i + 1) begin
+            pull_data_reg[i*2 +: 2] = pin_pull[i];
+        end
+    end
+
     // Read handling
     always @(*) begin
         case (wr_addr)
             REG_DIR:     rd_data = {8'h00, pin_dir};
             REG_SEL:     rd_data = {pin_sel[3], pin_sel[2], pin_sel[1], pin_sel[0]};
             REG_SEL_H:   rd_data = {pin_sel[7], pin_sel[6], pin_sel[5], pin_sel[4]};
-            REG_PULL: begin
-                reg [15:0] pull_data;
-                for (i = 0; i < NUM_PINS; i = i + 1) pull_data[i*2 +: 2] = pin_pull[i];
-                rd_data = pull_data;
-            end
+            REG_PULL:    rd_data = pull_data_reg;
             REG_DIR_CLR: rd_data = {8'h00, pin_dir};
             REG_OUT:     rd_data = {8'h00, cpu_pin_out};
             REG_IN:      rd_data = {8'h00, pin_in_sync};
